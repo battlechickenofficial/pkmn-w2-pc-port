@@ -64,10 +64,13 @@ Either way, rebuilding matching ROMs also needs BLZ **re-compression** that repr
 ## Stage 2: matching decompilation
 Order by payoff: Nitro SDK and libc (largely shared with other DS decomps) → GameFreak "GFL" system layer (heap, FS, tasks, messages) → field and overworld → battle engine → menus → minigames, PWT, Join Avenue, Musical. Expect years of community effort. Route A cuts most of that.
 
-## Stage 3: Windows build
-1. **Port layer** replacing NitroSDK: GX/G3 3D → OpenGL/Vulkan, G2/BG/OAM 2D → renderer, DMA/IRQ/OS threads → host equivalents, `FS_*` → host files from `extracted/`, card backup → save file, SND sequencer (SSEQ/SBNK/SWAR from `swan_sound_data.sdat`) → software mixer, keys/touch → SDL input, two screens → window layout, wireless/DWC → stubs.
-2. Compile the decompiled C natively (clang/MSVC, 32-bit pointer assumptions to audit), linking the port layer instead of the SDK.
-3. **Faster interim option:** static recompilation of the ARM code into C (N64Recomp-style) on top of the same port layer. This gives a Windows executable before the decomp is finished, at the cost of readable source.
+## Stage 3: Windows build: static recompilation (in progress)
+Chosen route (2026-10-30): static recompilation instead of waiting for matching C. See [port/README.md](../port/README.md).
+- `tools/recomp` turns the dsd-described ARM9 modules into C (219,642 instructions, no unsupported ones). `port/build.py` compiles them with MSVC into `b2w2.exe`.
+- The runtime boots White 2 through crt0, SDK OS/PXI init and card reads up to the first thread wait.
+- Next: interrupts, guest threads on host fibers, ARM7 PXI services, overlays, then graphics, sound and input through SDL/OpenGL.
+
+Matching decompilation (Stage 2) can continue alongside: a decompiled function can replace its recompiled counterpart one at a time.
 
 ## Stage 4: merging BW1 assets into the B2W2 build
 Because archive numbers don't line up between generations, merging needs a semantic map:

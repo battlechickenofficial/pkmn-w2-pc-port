@@ -3,7 +3,7 @@
 Decompilation workspace for Pocket Monsters Black 2 / White 2 (Japan, Rev 1), aimed at a native Windows build.
 Black / White (Japan) assets are extracted alongside for a later merge.
 
-**Current stage:** White 2 links from dsd-delinked objects with Metrowerks `mwldarm` and rebuilds byte-identical. Black 2 is waiting on a DSi-mode redump. See [docs/ROADMAP.md](docs/ROADMAP.md).
+**Current stage:** White 2 links from dsd-delinked objects with Metrowerks `mwldarm` and rebuilds byte-identical. The Windows port (static recompilation, [port/](port/README.md)) boots the recompiled ARM9 up to the first thread wait. Black 2 is waiting on a DSi-mode redump. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Layout
 ```
@@ -22,6 +22,8 @@ tools/ndsrom.py     dependency-free ROM info / extract / rebuild / verify (+BLZ,
 tools/bin/          downloaded toolchain: dsd, objdiff-cli, ninja  (git-ignored)
 tools/mwccarm/      Metrowerks compilers/linkers, all versions     (git-ignored)
 configure.py        writes build.ninja for the matching build
+tools/recomp/       ARM9 -> C static recompiler (Rust)
+port/               Windows port: runtime, ARM7 stand-in, card bus, build script
 ```
 
 ## Matching build (W2)

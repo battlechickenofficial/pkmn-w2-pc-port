@@ -13,3 +13,4 @@ tools/mwccarm/
 build.ninja
 .ninja_log
 .ninja_deps
+tools/recomp/target/

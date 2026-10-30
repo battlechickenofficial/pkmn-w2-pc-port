@@ -1,0 +1,8 @@
+# Code the game copies somewhere else at runtime and runs there. Each copy is recompiled as its own module at its run
+# address; the runtime uses it only while guest memory at that address holds the same bytes as the source.
+#
+# version  source      run_address  size   mode
+# crt0 (Entry, 0x02004800) runs these from ITCM before the autoloads are in place
+w2         0x02004fd4  0x01ff8000   0x28   arm
+w2         0x02004f94  0x01ff8000   0x1c   arm
+w2         0x02004ffc  0x01ff801c   0x34   arm
