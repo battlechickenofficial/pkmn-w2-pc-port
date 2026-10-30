@@ -1,0 +1,33 @@
+func_ov130_021ee340 kind:function(thumb,size=0x5a) addr:0x021ee340
+func_ov130_021ee39c kind:function(thumb,size=0x2c) addr:0x021ee39c
+func_ov130_021ee3c8 kind:function(thumb,size=0x8e) addr:0x021ee3c8
+func_ov130_021ee458 kind:function(thumb,size=0x1c) addr:0x021ee458
+func_ov130_021ee474 kind:function(thumb,size=0x1c) addr:0x021ee474
+func_ov130_021ee490 kind:function(thumb,size=0x104) addr:0x021ee490
+func_ov130_021ee594 kind:function(thumb,size=0xc) addr:0x021ee594
+func_ov130_021ee5a0 kind:function(thumb,size=0xc) addr:0x021ee5a0
+func_ov130_021ee5ac kind:function(thumb,size=0x4c) addr:0x021ee5ac
+func_ov130_021ee5f8 kind:function(thumb,size=0x34) addr:0x021ee5f8
+func_ov130_021ee62c kind:function(thumb,size=0x20) addr:0x021ee62c
+func_ov130_021ee64c kind:function(thumb,size=0x10) addr:0x021ee64c
+func_ov130_021ee65c kind:function(thumb,size=0xb4) addr:0x021ee65c
+func_ov130_021ee710 kind:function(thumb,size=0x18) addr:0x021ee710
+func_ov130_021ee728 kind:function(thumb,size=0x2c) addr:0x021ee728
+func_ov130_021ee754 kind:function(thumb,size=0x2c) addr:0x021ee754
+func_ov130_021ee780 kind:function(thumb,size=0x36) addr:0x021ee780
+func_ov130_021ee7b8 kind:function(thumb,size=0x1e) addr:0x021ee7b8
+func_ov130_021ee7d8 kind:function(thumb,size=0x38) addr:0x021ee7d8
+func_ov130_021ee810 kind:function(thumb,size=0x30) addr:0x021ee810
+data_ov130_021ee840 kind:data(any) addr:0x021ee840
+data_ov130_021ee844 kind:data(any) addr:0x021ee844
+data_ov130_021ee848 kind:data(any) addr:0x021ee848
+data_ov130_021ee850 kind:data(any) addr:0x021ee850
+data_ov130_021ee85c kind:data(any) addr:0x021ee85c
+data_ov130_021ee86c kind:data(any) addr:0x021ee86c
+data_ov130_021ee87c kind:data(any) addr:0x021ee87c
+data_ov130_021ee8d1 kind:data(any) addr:0x021ee8d1 ambiguous
+data_ov130_021ee8f1 kind:data(any) addr:0x021ee8f1 ambiguous
+data_ov130_021ee90c kind:data(any) addr:0x021ee90c
+data_ov130_021ee949 kind:data(any) addr:0x021ee949 ambiguous
+data_ov130_021ee95d kind:data(any) addr:0x021ee95d ambiguous
+data_ov130_021ee9a1 kind:data(any) addr:0x021ee9a1 ambiguous

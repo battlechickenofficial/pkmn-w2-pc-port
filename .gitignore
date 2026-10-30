@@ -1,0 +1,15 @@
+# Never commit game data. Everything below is generated from your own ROM dumps.
+baserom/
+extracted/
+extract/
+build/
+tools/bin/
+*.nds
+*.narc
+*.sdat
+*.zip
+__pycache__/
+tools/mwccarm/
+build.ninja
+.ninja_log
+.ninja_deps

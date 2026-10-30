@@ -1,0 +1,2 @@
+func_ov017_0216e000 kind:function(thumb,size=0x13c) addr:0x0216e000
+func_ov017_0216e13c kind:function(thumb,size=0x30) addr:0x0216e13c

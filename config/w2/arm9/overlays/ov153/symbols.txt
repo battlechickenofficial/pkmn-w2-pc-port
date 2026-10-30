@@ -1,0 +1,5 @@
+func_ov153_021f58a0 kind:function(thumb,size=0x3c) addr:0x021f58a0
+func_ov153_021f58dc kind:function(thumb,size=0x2c) addr:0x021f58dc
+func_ov153_021f5908 kind:function(thumb,size=0x5a) addr:0x021f5908
+func_ov153_021f5964 kind:function(thumb,size=0x1e) addr:0x021f5964
+data_ov153_021f5984 kind:data(any) addr:0x021f5984

@@ -1,0 +1,38 @@
+func_ov061_021e4f40 kind:function(thumb,size=0x28) addr:0x021e4f40
+func_ov061_021e4f68 kind:function(thumb,size=0x5e) addr:0x021e4f68
+func_ov061_021e4fc8 kind:function(thumb,size=0x3a) addr:0x021e4fc8
+func_ov061_021e5004 kind:function(thumb,size=0x3e) addr:0x021e5004
+func_ov061_021e5044 kind:function(thumb,size=0x48) addr:0x021e5044
+func_ov061_021e508c kind:function(thumb,size=0x30) addr:0x021e508c
+func_ov061_021e50bc kind:function(thumb,size=0x30) addr:0x021e50bc
+func_ov061_021e50ec kind:function(thumb,size=0x3e) addr:0x021e50ec
+func_ov061_021e512c kind:function(thumb,size=0x4a) addr:0x021e512c
+func_ov061_021e5178 kind:function(thumb,size=0x2c) addr:0x021e5178
+func_ov061_021e51a4 kind:function(thumb,size=0x2c) addr:0x021e51a4
+func_ov061_021e51d0 kind:function(thumb,size=0x18) addr:0x021e51d0
+func_ov061_021e51e8 kind:function(thumb,size=0x4a) addr:0x021e51e8
+func_ov061_021e5234 kind:function(thumb,size=0x4a) addr:0x021e5234
+func_ov061_021e5280 kind:function(thumb,size=0x6c) addr:0x021e5280
+func_ov061_021e52ec kind:function(thumb,size=0x18) addr:0x021e52ec
+func_ov061_021e5304 kind:function(thumb,size=0x40) addr:0x021e5304
+func_ov061_021e5344 kind:function(thumb,size=0x56) addr:0x021e5344
+func_ov061_021e539c kind:function(thumb,size=0x5a) addr:0x021e539c
+func_ov061_021e53f8 kind:function(thumb,size=0x52) addr:0x021e53f8
+func_ov061_021e544c kind:function(thumb,size=0x4c) addr:0x021e544c
+func_ov061_021e5498 kind:function(thumb,size=0x4c) addr:0x021e5498
+func_ov061_021e54e4 kind:function(thumb,size=0x30) addr:0x021e54e4
+func_ov061_021e5514 kind:function(thumb,size=0x32) addr:0x021e5514
+func_ov061_021e5548 kind:function(thumb,size=0x56) addr:0x021e5548
+func_ov061_021e55a0 kind:function(thumb,size=0x36) addr:0x021e55a0
+func_ov061_021e55d8 kind:function(thumb,size=0xfc) addr:0x021e55d8
+func_ov061_021e56d4 kind:function(thumb,size=0x50) addr:0x021e56d4
+func_ov061_021e5724 kind:function(thumb,size=0x58) addr:0x021e5724
+func_ov061_021e577c kind:function(thumb,size=0x6a) addr:0x021e577c
+func_ov061_021e57e8 kind:function(thumb,size=0x4c) addr:0x021e57e8
+func_ov061_021e5834 kind:function(thumb,size=0x8c) addr:0x021e5834
+data_ov061_021e58c0 kind:data(any) addr:0x021e58c0
+data_ov061_021e58dd kind:data(any) addr:0x021e58dd ambiguous
+data_ov061_021e5918 kind:data(any) addr:0x021e5918
+data_ov061_021e5919 kind:data(any) addr:0x021e5919 ambiguous
+data_ov061_021e5970 kind:data(any) addr:0x021e5970
+data_ov061_021e59e9 kind:data(any) addr:0x021e59e9 ambiguous

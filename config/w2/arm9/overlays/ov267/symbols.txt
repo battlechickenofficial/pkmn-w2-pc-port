@@ -1,0 +1,37 @@
+func_ov267_0219c880 kind:function(thumb,size=0xac) addr:0x0219c880
+func_ov267_0219c92c kind:function(thumb,size=0x70) addr:0x0219c92c
+func_ov267_0219c99c kind:function(thumb,size=0xb8) addr:0x0219c99c
+func_ov267_0219ca54 kind:function(thumb,size=0x2) addr:0x0219ca54
+func_ov267_0219ca58 kind:function(thumb,size=0x9a) addr:0x0219ca58
+func_ov267_0219caf4 kind:function(thumb,size=0x2) addr:0x0219caf4
+func_ov267_0219caf8 kind:function(thumb,size=0x2c) addr:0x0219caf8
+func_ov267_0219cb24 kind:function(thumb,size=0xa4) addr:0x0219cb24
+func_ov267_0219cbc8 kind:function(thumb,size=0xa8) addr:0x0219cbc8
+func_ov267_0219cc70 kind:function(thumb,size=0x5c) addr:0x0219cc70
+func_ov267_0219cccc kind:function(thumb,size=0x12) addr:0x0219cccc
+func_ov267_0219cce0 kind:function(thumb,size=0x12) addr:0x0219cce0
+func_ov267_0219ccf4 kind:function(thumb,size=0x60) addr:0x0219ccf4
+func_ov267_0219cd54 kind:function(thumb,size=0x38) addr:0x0219cd54
+func_ov267_0219cd8c kind:function(thumb,size=0x2) addr:0x0219cd8c
+func_ov267_0219cd90 kind:function(thumb,size=0x8) addr:0x0219cd90
+func_ov267_0219cd98 kind:function(thumb,size=0x40) addr:0x0219cd98
+func_ov267_0219cdd8 kind:function(thumb,size=0x1a) addr:0x0219cdd8
+func_ov267_0219cdf4 kind:function(thumb,size=0x8) addr:0x0219cdf4
+func_ov267_0219cdfc kind:function(thumb,size=0x8) addr:0x0219cdfc
+func_ov267_0219ce04 kind:function(thumb,size=0x6c) addr:0x0219ce04
+func_ov267_0219ce70 kind:function(thumb,size=0xe) addr:0x0219ce70
+data_ov267_0219ce80 kind:data(any) addr:0x0219ce80
+data_ov267_0219ce84 kind:data(any) addr:0x0219ce84
+data_ov267_0219ce89 kind:data(any) addr:0x0219ce89 ambiguous
+data_ov267_0219ce90 kind:data(any) addr:0x0219ce90
+data_ov267_0219cebc kind:data(any) addr:0x0219cebc
+data_ov267_0219cec8 kind:data(any) addr:0x0219cec8
+data_ov267_0219ced4 kind:data(any) addr:0x0219ced4
+data_ov267_0219cee0 kind:data(any) addr:0x0219cee0
+data_ov267_0219cef0 kind:data(any) addr:0x0219cef0
+data_ov267_0219cef5 kind:data(any) addr:0x0219cef5 ambiguous
+data_ov267_0219cf0c kind:data(any) addr:0x0219cf0c
+data_ov267_0219cf2c kind:data(any) addr:0x0219cf2c
+data_ov267_0219cf50 kind:data(any) addr:0x0219cf50 ambiguous
+data_ov267_0219cf5c kind:data(any) addr:0x0219cf5c
+data_ov267_0219cfc0 kind:data(any) addr:0x0219cfc0

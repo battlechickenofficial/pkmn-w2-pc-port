@@ -1,0 +1,33 @@
+func_ov317_0219c880 kind:function(thumb,size=0x168) addr:0x0219c880
+func_ov317_0219c9e8 kind:function(thumb,size=0x70) addr:0x0219c9e8
+func_ov317_0219ca58 kind:function(thumb,size=0x98) addr:0x0219ca58
+func_ov317_0219caf0 kind:function(thumb,size=0x2) addr:0x0219caf0
+func_ov317_0219caf4 kind:function(thumb,size=0x74) addr:0x0219caf4
+func_ov317_0219cb68 kind:function(thumb,size=0x2) addr:0x0219cb68
+func_ov317_0219cb6c kind:function(thumb,size=0xa4) addr:0x0219cb6c
+func_ov317_0219cc10 kind:function(thumb,size=0xa8) addr:0x0219cc10
+func_ov317_0219ccb8 kind:function(thumb,size=0x5c) addr:0x0219ccb8
+func_ov317_0219cd14 kind:function(thumb,size=0x12) addr:0x0219cd14
+func_ov317_0219cd28 kind:function(thumb,size=0x12) addr:0x0219cd28
+func_ov317_0219cd3c kind:function(thumb,size=0x60) addr:0x0219cd3c
+func_ov317_0219cd9c kind:function(thumb,size=0x38) addr:0x0219cd9c
+func_ov317_0219cdd4 kind:function(thumb,size=0x2) addr:0x0219cdd4
+func_ov317_0219cdd8 kind:function(thumb,size=0x8) addr:0x0219cdd8
+func_ov317_0219cde0 kind:function(thumb,size=0x40) addr:0x0219cde0
+func_ov317_0219ce20 kind:function(thumb,size=0x1a) addr:0x0219ce20
+func_ov317_0219ce3c kind:function(thumb,size=0x8) addr:0x0219ce3c
+func_ov317_0219ce44 kind:function(thumb,size=0x8) addr:0x0219ce44
+func_ov317_0219ce4c kind:function(thumb,size=0x6c) addr:0x0219ce4c
+func_ov317_0219ceb8 kind:function(thumb,size=0xe) addr:0x0219ceb8
+data_ov317_0219cec8 kind:data(any) addr:0x0219cec8 ambiguous
+data_ov317_0219ced4 kind:data(any) addr:0x0219ced4
+data_ov317_0219cef5 kind:data(any) addr:0x0219cef5 ambiguous
+data_ov317_0219cf00 kind:data(any) addr:0x0219cf00
+data_ov317_0219cf0c kind:data(any) addr:0x0219cf0c
+data_ov317_0219cf18 kind:data(any) addr:0x0219cf18
+data_ov317_0219cf24 kind:data(any) addr:0x0219cf24
+data_ov317_0219cf34 kind:data(any) addr:0x0219cf34
+data_ov317_0219cf50 kind:data(any) addr:0x0219cf50
+data_ov317_0219cf70 kind:data(any) addr:0x0219cf70
+data_ov317_0219cfa0 kind:data(any) addr:0x0219cfa0
+data_ov317_0219d000 kind:data(any) addr:0x0219d000
