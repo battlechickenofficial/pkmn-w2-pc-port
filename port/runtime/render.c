@@ -1,7 +1,7 @@
-/* The two 2D engines, drawn once a frame from the registers, VRAM, palette and OAM as they are at VBlank.
- * Follows GBATEK "DS Video": BG modes 0-5 (text, affine, extended), sprites, windows, blending, master brightness,
- * the VRAM display mode, and engine A's BG0 showing the 3D engine's output. Mid-frame register changes are not
- * seen; colours are 15-bit BGR until the final conversion. */
+/* The two 2D engines, drawn a scanline at a time from the registers, VRAM, palette and OAM as they are when that
+ * line is drawn, so mid-frame changes (HBlank DMA, VCount interrupts) show. Follows GBATEK "DS Video": BG modes 0-5
+ * (text, affine, extended), sprites, windows, blending, master brightness, the VRAM display mode, display capture,
+ * and engine A's BG0 showing the 3D engine's output. Colours are 15-bit BGR until the final conversion. */
 #include "internal.h"
 
 typedef struct {
@@ -21,6 +21,11 @@ static uint16_t pal(uint32_t off) { uint16_t v; memcpy(&v, rc_palette + ((off + 
 static uint32_t bg_vram(void) { return engine ? 0x06200000 : 0x06000000; }
 static uint32_t obj_vram(void) { return engine ? 0x06600000 : 0x06400000; }
 static uint16_t ext16(uint8_t *p, uint32_t i) { uint16_t v; memcpy(&v, p + i * 2, 2); return v; }
+
+/* Affine BG reference points: latched from BGxX/BGxY at the start of a frame or when the game writes them,
+ * then moved by PB/PD after each line */
+static int32_t aff_x[2][2], aff_y[2][2];
+static uint32_t aff_raw[2][2][2];
 
 static void put(Line *l, int x, uint16_t c, uint8_t prio, uint8_t flags, uint8_t alpha) {
     l->color[x] = c & 0x7fff; l->prio[x] = prio; l->flags[x] = flags | OPAQUE; l->alpha[x] = alpha;
@@ -69,8 +74,9 @@ static void bg_affine(Line *l, int n, int y, int extended) {
     uint16_t cnt = io16(eo + 8 + 2 * n);
     uint32_t ar = eo + (n == 2 ? 0x20 : 0x30);
     int32_t pa = (int16_t)io16(ar), pb = (int16_t)io16(ar + 2), pc = (int16_t)io16(ar + 4), pd = (int16_t)io16(ar + 6);
-    int32_t rx = (int32_t)(io32(ar + 8) << 4) >> 4, ry = (int32_t)(io32(ar + 12) << 4) >> 4;
-    int32_t x0 = rx + pb * y, y0 = ry + pd * y;
+    /* The internal reference point, which the hardware advances by PB/PD every line (render_engine_line) */
+    int32_t x0 = aff_x[engine][n - 2], y0 = aff_y[engine][n - 2];
+    (void)pb; (void)pd; (void)y;
     int wrap = cnt & 0x2000, size = cnt >> 14;
     uint32_t chr = bg_vram() + ((cnt >> 2) & 15) * 0x4000 + (engine ? 0 : ((dispcnt >> 24) & 7) * 0x10000);
     uint32_t scr = bg_vram() + ((cnt >> 8) & 31) * 0x800 + (engine ? 0 : ((dispcnt >> 27) & 7) * 0x10000);
@@ -124,8 +130,8 @@ static void bg_3d(Line *l, int y) {
     uint8_t prio = io16(eo + 8) & 3;
     for (int x = 0; x < 256; x++) {
         int sx = x + hofs;
-        if (sx < 0 || sx >= 256) continue;
-        uint32_t p = fb3[y * 256 + sx];
+        if (sx < -GPU3D_OFS || sx >= 256 + GPU3D_OFS) continue;
+        uint32_t p = fb3[y * GPU3D_W + sx + GPU3D_OFS];
         uint8_t a = (p >> 16) & 31;
         if (a) put(l, x, (uint16_t)p, prio, IS3D, a);
     }
@@ -266,7 +272,8 @@ static void capture(const uint32_t *graphics) {
             int i = y * 256 + x;
             uint16_t a;
             int aa;
-            if (cnt & (1u << 24)) { a = (uint16_t)(fb3[i] & 0x7fff); aa = ((fb3[i] >> 16) & 31) != 0; }
+            uint32_t p3 = fb3[y * GPU3D_W + x + GPU3D_OFS];
+            if (cnt & (1u << 24)) { a = (uint16_t)(p3 & 0x7fff); aa = ((p3 >> 16) & 31) != 0; }
             else { a = (uint16_t)graphics[i]; aa = 1; }
             uint16_t b = 0;
             int ab = 0;
@@ -288,41 +295,45 @@ static void capture(const uint32_t *graphics) {
     set_io32(0x64, cnt & ~0x80000000u);
 }
 
-static void render_engine(int e, uint32_t *out) {
+static uint32_t pre[2][256 * 192];       /* engine output before display mode and master brightness */
+static uint32_t fin[2][GPU3D_W * 192];   /* what the screens show, with the widescreen margins */
+
+static void render_engine_line(int e, int y) {
     engine = e;
     eo = e ? 0x1000 : 0;
     dispcnt = io32(eo);
+    /* Affine reference points: reload at the frame start or after a write, otherwise step by PB/PD */
+    for (int k = 0; k < 2; k++) {
+        uint32_t ar = eo + (k == 0 ? 0x20 : 0x30);
+        uint32_t rx = io32(ar + 8), ry = io32(ar + 12);
+        if (y == 0 || rx != aff_raw[e][k][0]) aff_x[e][k] = (int32_t)(rx << 4) >> 4;
+        if (y == 0 || ry != aff_raw[e][k][1]) aff_y[e][k] = (int32_t)(ry << 4) >> 4;
+        aff_raw[e][k][0] = rx; aff_raw[e][k][1] = ry;
+    }
+    uint32_t *out = pre[e] + y * 256, *row = fin[e] + y * GPU3D_W, *shown = row + GPU3D_OFS;
     int display = (dispcnt >> 16) & 3;
     if (!(io16(0x304) & (e ? 0x0200 : 0x0002)) || display == 0 || (dispcnt & 0x80)) {
-        for (int i = 0; i < 256 * 192; i++) out[i] = 0xffffffff;
-        return;
-    }
-    /* VRAM display shows an LCDC bank as a bitmap; read it before this frame's capture writes to it */
-    static uint16_t vram_view[256 * 192];
-    if (display == 2 && !e) {
-        uint8_t *bank = rc_vram_lcdc(0x06800000 + ((dispcnt >> 18) & 3) * 0x20000);
-        for (int i = 0; i < 256 * 192; i++) vram_view[i] = bank ? ext16(bank, i) : 0;
-    }
-    int mode = dispcnt & 7;
-    uint16_t bldcnt = io16(eo + 0x50), bldalpha = io16(eo + 0x52);
-    int bmode = (bldcnt >> 6) & 3, eva = bldalpha & 31, evb = (bldalpha >> 8) & 31, evy = io16(eo + 0x54) & 31;
-    if (eva > 16) eva = 16;
-    if (evb > 16) evb = 16;
-    if (evy > 16) evy = 16;
-    int windows = (dispcnt >> 13) & 7;
-    uint16_t winin = io16(eo + 0x48), winout = io16(eo + 0x4a);
-    uint16_t backdrop = pal(0);
-    static Line bg[4], obj;
+        for (int x = 0; x < GPU3D_W; x++) row[x] = 0xff000000;
+        for (int x = 0; x < 256; x++) { out[x] = 0x7fff; shown[x] = 0xffffffff; }
+    } else {
+        int mode = dispcnt & 7;
+        uint16_t bldcnt = io16(eo + 0x50), bldalpha = io16(eo + 0x52);
+        int bmode = (bldcnt >> 6) & 3, eva = bldalpha & 31, evb = (bldalpha >> 8) & 31, evy = io16(eo + 0x54) & 31;
+        if (eva > 16) eva = 16;
+        if (evb > 16) evb = 16;
+        if (evy > 16) evy = 16;
+        int windows = (dispcnt >> 13) & 7;
+        uint16_t winin = io16(eo + 0x48), winout = io16(eo + 0x4a);
+        uint16_t backdrop = pal(0);
+        static Line bg[4], obj;
 
-    for (int y = 0; y < 192; y++) {
         for (int n = 0; n < 4; n++) {
             memset(&bg[n].flags, 0, sizeof bg[n].flags);
             if (!(dispcnt & (0x100u << n))) continue;
             if (n == 0 && !e && (dispcnt & 8)) { bg_3d(&bg[0], y); continue; }
             int type = 0;                                    /* 0 text, 1 affine, 2 extended */
-            if (n == 2) type = mode == 2 || mode == 4 ? 1 : mode == 5 ? 2 : mode == 1 ? 0 : 0;
+            if (n == 2) type = mode == 2 || mode == 4 ? 1 : mode == 5 ? 2 : 0;
             if (n == 3) type = mode == 1 || mode == 2 ? 1 : mode >= 3 && mode <= 5 ? 2 : 0;
-            if (n == 2 && mode == 1) type = 0;
             if (type == 0) bg_text(&bg[n], n, y);
             else bg_affine(&bg[n], n, y, type == 2);
         }
@@ -354,32 +365,70 @@ static void render_engine(int e, uint32_t *out) {
             int first_ok = (bldcnt >> top) & 1, second_ok = (bldcnt >> (8 + second)) & 1;
             uint16_t c = c1;
             if (mask & 0x20) {
-                if ((f1 & IS3D) && a1 < 31 && second_ok) c = blend(c1, c2, (a1 + 1) / 2, 16 - (a1 + 1) / 2);
+                if (f1 & IS3D) {
+                    /* The 3D layer blends by its own pixel alpha, never by EVA/EVB (an opaque 3D pixel stays) */
+                    if (second_ok && (bmode == 1 || a1 < 31)) c = blend(c1, c2, (a1 + 1) / 2, 16 - (a1 + 1) / 2);
+                    else if (bmode == 2 && first_ok) c = brighten(c1, evy, 1);
+                    else if (bmode == 3 && first_ok) c = brighten(c1, evy, 0);
+                }
                 else if ((f1 & SEMI) && second_ok) c = blend(c1, c2, eva, evb);
                 else if (bmode == 1 && first_ok && second_ok) c = blend(c1, c2, eva, evb);
                 else if (bmode == 2 && first_ok) c = brighten(c1, evy, 1);
                 else if (bmode == 3 && first_ok) c = brighten(c1, evy, 0);
             }
-            out[y * 256 + x] = c;
+            out[x] = c;
+        }
+
+        /* What reaches the screen: the engine's picture, an LCDC bank (VRAM display) or nothing (main memory
+         * display), then master brightness */
+        uint8_t *bank = display == 2 && !e ? rc_vram_lcdc(0x06800000 + ((dispcnt >> 18) & 3) * 0x20000) : NULL;
+        uint16_t mb = io16(eo + 0x6c);
+        int mmode = mb >> 14, mf = mb & 31;
+        if (mf > 16) mf = 16;
+        for (int x = 0; x < 256; x++) {
+            uint16_t c = (uint16_t)out[x];
+            if (display == 2 && !e) c = bank ? ext16(bank, (uint32_t)(y * 256 + x)) : 0;
+            else if (display == 3) c = 0;
+            if (mmode == 1) c = brighten(c, mf, 1);
+            else if (mmode == 2) c = brighten(c, mf, 0);
+            shown[x] = to_argb(c);
+        }
+        /* Widescreen margins: only the 3D world reaches past the DS's 256 pixels (2D is laid out for 256), over
+         * the backdrop; screens without 3D get black bars */
+        int wide3d = !e && display == 1 && (dispcnt & 8) && (dispcnt & 0x100);
+        const uint32_t *fb3 = gpu3d_framebuffer();
+        for (int x = 0; x < GPU3D_W; x++) {
+            if (x == GPU3D_OFS) x += 256;
+            uint16_t c = 0;
+            if (wide3d) {
+                uint32_t p = fb3[y * GPU3D_W + x];
+                int a = (p >> 16) & 31;
+                c = a >= 31 ? (uint16_t)(p & 0x7fff) : a ? blend((uint16_t)p, backdrop, (a + 1) / 2, 16 - (a + 1) / 2) : backdrop;
+                if (mmode == 1) c = brighten(c, mf, 1);
+                else if (mmode == 2) c = brighten(c, mf, 0);
+            }
+            row[x] = to_argb(c);
         }
     }
-    if (!e) capture(out);
-    if (display == 2 && !e) for (int i = 0; i < 256 * 192; i++) out[i] = vram_view[i];
-    if (display == 3) for (int i = 0; i < 256 * 192; i++) out[i] = 0;
-
-    /* Master brightness, then to 32-bit */
-    uint16_t mb = io16(eo + 0x6c);
-    int mmode = mb >> 14, mf = mb & 31;
-    if (mf > 16) mf = 16;
-    for (int i = 0; i < 256 * 192; i++) {
-        uint16_t c = (uint16_t)out[i];
-        if (mmode == 1) c = brighten(c, mf, 1);
-        else if (mmode == 2) c = brighten(c, mf, 0);
-        out[i] = to_argb(c);
+    for (int k = 0; k < 2; k++) {
+        uint32_t ar = eo + (k == 0 ? 0x20 : 0x30);
+        aff_x[e][k] += (int16_t)io16(ar + 2);
+        aff_y[e][k] += (int16_t)io16(ar + 6);
     }
 }
 
+/* Called from the video timing for each visible line, after the HBlank DMA of the line before */
+void render_line(int y) {
+    render_engine_line(0, y);
+    render_engine_line(1, y);
+}
+
+/* At VBlank: capture this frame of engine A, and hand over both pictures */
 void render_frame(uint32_t *a, uint32_t *b) {
-    render_engine(0, a);
-    render_engine(1, b);
+    engine = 0;
+    eo = 0;
+    dispcnt = io32(0);
+    capture(pre[0]);
+    memcpy(a, fin[0], sizeof fin[0]);
+    memcpy(b, fin[1], sizeof fin[1]);
 }

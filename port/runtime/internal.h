@@ -71,8 +71,14 @@ void fe_init(void);
 void fe_vblank(void);                             /* present the frame, pump input, keep 60 Hz */
 extern uint16_t fe_keys;                          /* KEYINPUT bits, 0 = pressed */
 extern uint16_t fe_extkeys;                       /* X, Y bits as the ARM7 reports them */
-void render_frame(uint32_t *engine_a, uint32_t *engine_b);
+void render_frame(uint32_t *engine_a, uint32_t *engine_b);  /* each GPU3D_W x 192 */
+void render_line(int y);
+int fe_render_wanted(void);                       /* this frame is shown: a window is open or a screenshot is due */
 void gpu3d_write(uint32_t off, uint32_t v);       /* geometry registers 0x04000400-0x040006ff */
 uint32_t gpu3d_read(uint32_t off);
+/* Widescreen: the 3D engine and the screens are drawn GPU3D_W wide, the DS's 256 pixels in the middle and
+ * GPU3D_OFS more on each side (16:9 at 192 lines). */
+#define GPU3D_W 342
+#define GPU3D_OFS 43
 void gpu3d_swap(void);                            /* at VBlank, if SWAP_BUFFERS was issued */
-const uint32_t *gpu3d_framebuffer(void);          /* 256x192: BGR555 in bits 0-14, alpha 0-31 in 16-20 */
+const uint32_t *gpu3d_framebuffer(void);          /* GPU3D_W x 192: BGR555 in bits 0-14, alpha 0-31 in 16-20 */

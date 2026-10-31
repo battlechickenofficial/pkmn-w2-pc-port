@@ -294,16 +294,26 @@ static void card_command(uint32_t cmd) {
 }
 
 /* Tag 7: sound. The ARM9 sends the address of a linked list of commands (NitroSDK SNDCommand: next, id, arg[4]);
- * the ARM7's driver runs them and counts finished lists in SNDSharedWork.finishCommandTag (+0), whose address comes
- * with command 29 (SHARED_WORK). This stand-in keeps that bookkeeping and the driver-info replies, so the game
- * never waits on sound; it does not play anything (that needs an SDAT sequencer and mixer). */
+ * snd.c plays them. This side counts finished lists in SNDSharedWork.finishCommandTag (+0), whose address comes with
+ * command 29 (SHARED_WORK), and answers driver-info reads. */
 static uint32_t snd_shared;
+void snd_command(uint32_t id, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3);
+void snd_set_shared(uint32_t a);
+
+/* An alarm set up by SETUP_ALARM went off: the ARM9's callback (func_0207d898) takes the alarm number in the low
+ * byte and its id in the next */
+void arm7_reply_sound_alarm(int no, int id) { arm7_reply(7 | (uint32_t)(no | id << 8) << 6); }
 
 static void sound_commands(uint32_t list) {
     for (int guard = 0; list && guard < 4096; guard++) {
         uint32_t next = rd32(list), id = rd32(list + 4), arg0 = rd32(list + 8);
+        static int logged[64];
+        if (getenv("B2W2_LOG_SND") && id < 64 && logged[id]++ < 6)
+            rc_logf("snd cmd %2u: %08x %08x %08x %08x (frame %llu)\n", id, arg0, rd32(list + 12), rd32(list + 16),
+                    rd32(list + 20), (unsigned long long)rc_frames);
+        snd_command(id, arg0, rd32(list + 12), rd32(list + 16), rd32(list + 20));
         switch (id) {
-        case 29: snd_shared = arg0; break;                       /* SHARED_WORK */
+        case 29: snd_shared = arg0; snd_set_shared(arg0); break;    /* SHARED_WORK */
         case 33:                                                 /* READ_DRIVER_INFO: all channels and players idle */
             for (uint32_t i = 0; i < 0x400; i += 4) wr32(arg0 + i, 0);
             break;
@@ -312,6 +322,20 @@ static void sound_commands(uint32_t list) {
         list = next;
     }
     if (snd_shared) wr32(snd_shared, rd32(snd_shared) + 1);
+}
+
+/* Tag 10: wireless (WM). The ARM9 sends the address of a request whose first halfword is the API ID (the sender
+ * around 0x020806cc). The ARM7 answers with the address of a callback record {u16 api ID, u16 error code, ...} in its
+ * own buffer, which the WM work area (pointer at 0x0214dc98, +4) gives at +0x10; func_0208080c dispatches it. There is
+ * no wireless here: every request fails with WM_ERRCODE_WM_DISABLE (4), as on a console with wireless turned off. */
+static void wm_request(uint32_t req) {
+    uint32_t work = rd32(0x0214dc98) ? rd32(rd32(0x0214dc98) + 4) : 0;
+    uint32_t buf = work ? rd32(work + 0x10) : 0;
+    if (!buf) return;
+    for (uint32_t i = 0; i < 0x40; i += 4) wr32(buf + i, 0);
+    wr16(buf, rd16(req));
+    wr16(buf + 2, 4);
+    pxi_reply(10, buf);
 }
 
 static void arm7_fifo_send(uint32_t msg) {
@@ -330,6 +354,9 @@ static void arm7_fifo_send(uint32_t msg) {
         break;
     case 7:
         sound_commands(data);
+        break;
+    case 10:
+        wm_request(data);
         break;
     case 11:
         if (card_expect_arg) { card_arg = data; card_expect_arg = 0; card_command(0); }

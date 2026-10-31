@@ -19,7 +19,7 @@ VCVARS = Path(r'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxil
 
 CFLAGS = ['/nologo', '/c', '/O2', '/W3', '/D_CRT_SECURE_NO_WARNINGS', '/wd4102', '/wd4146', '/wd4244', '/MP1',
           f'/I{RUNTIME}', f'/I{GEN}']
-RUNTIME_SOURCES = ['runtime.c', 'sched.c', 'arm7.c', 'card.c', 'render.c', 'gpu3d.c', 'frontend.c']
+RUNTIME_SOURCES = ['runtime.c', 'sched.c', 'arm7.c', 'card.c', 'snd.c', 'render.c', 'gpu3d.c', 'frontend.c']
 
 
 def msvc_env():

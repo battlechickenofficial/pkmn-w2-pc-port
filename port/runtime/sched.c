@@ -67,7 +67,9 @@ static void scanline(void) {
     if (rc_vcount < 192 && (stat & 0x10)) rc_raise_irq(2);
     set_io16(4, stat);
     set_io16(6, rc_vcount);
-    if (rc_vcount < 192) rc_dma_event(2);
+    /* HBlank DMA of the line before (lines 0-191 have one), then this line is drawn with what it changed */
+    if (rc_vcount >= 1 && rc_vcount <= 192) rc_dma_event(2);
+    if (rc_vcount < 192 && fe_render_wanted()) render_line(rc_vcount);
     if (rc_vcount == 192) {
         if (stat & 8) rc_raise_irq(1);
         rc_dma_event(1);

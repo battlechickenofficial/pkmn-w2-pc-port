@@ -3,11 +3,13 @@
  * Commands arrive through the packed FIFO (0x04000400) or the per-command ports (0x04000440 + 4 * cmd) and run at
  * once. Polygons collect until SWAP_BUFFERS; the next VBlank rasterizes them into the framebuffer that BG0 of
  * engine A shows. Covered: matrices and stacks, all vertex formats, colours and lighting (diffuse, ambient,
- * emission, specular without the shininess table), texture coordinates (none / texcoord transform), polygon and
+ * emission, specular with the shininess table), texture coordinates (none / texcoord transform), polygon and
  * texture attributes, all seven texture formats, near-plane clipping, depth test, back/front culling, alpha test,
- * alpha blending. Not yet: toon/highlight, shadow polygons, fog, edge marking, anti-aliasing, translucent sorting. */
+ * alpha blending, toon/highlight, shadow polygons, translucent sorting, edge marking, fog. Anti-aliasing is an
+ * approximation (edges softened toward the neighbour behind them). */
 #include "internal.h"
 #include <math.h>
+#include <stdlib.h>
 
 typedef int32_t Mtx[16];          /* 4x4, 20.12 fixed point, row vectors: v' = v * M */
 
@@ -38,13 +40,15 @@ static int16_t vx, vy, vz;
 static float cur_r = 31, cur_g = 31, cur_b = 31, cur_s, cur_t;
 static int raw_s, raw_t;
 static uint32_t diffuse = 0, ambient = 0, specular = 0, emission = 0;
+static uint8_t shininess[128];
+static int use_shininess;
 static int32_t light_vec[4][3];
 static uint16_t light_col[4];
-static int swap_pending, wbuffer;
+static int swap_pending, wbuffer, sort_manual;
 static uint8_t viewport[4] = {0, 0, 255, 191};
 
-static uint32_t fb[256 * 192];
-static uint32_t depth[256 * 192];
+static uint32_t fb[GPU3D_W * 192];
+static uint32_t depth[GPU3D_W * 192];
 
 /* ------------------------------------------------------------------ matrices */
 
@@ -129,7 +133,7 @@ static void emit_poly(Vtx *v, int n) {
     p->texparam = texparam;
     p->palbase = palbase;
     uint32_t alpha = (cur_attr >> 16) & 31, fmt = (texparam >> 26) & 7;
-    p->translucent = (alpha && alpha < 31) || fmt == 1 || fmt == 6;
+    p->translucent = (alpha && alpha < 31) || fmt == 1 || fmt == 6 || ((cur_attr >> 4) & 3) == 3;
 }
 
 static void add_vertex(void) {
@@ -203,6 +207,7 @@ static void do_normal(uint32_t p) {
         float sp = hlen > 0 ? -(lv[0] * tn[0] + lv[1] * tn[1] - hz * tn[2]) / hlen : 0;
         if (sp < 0) sp = 0;
         sp = sp * sp;
+        if (use_shininess) sp = shininess[(int)(sp * 127) & 127] / 255.0f;
         uint16_t lc = light_col[l];
         float lr = lc & 31, lg = (lc >> 5) & 31, lb = (lc >> 10) & 31;
         r += lr * ((diffuse & 31) * d + (ambient & 31) + (specular & 31) * sp) / 31;
@@ -325,7 +330,8 @@ static void run(uint8_t cmd, const uint32_t *p) {
         diffuse = p[0] & 0x7fff; ambient = (p[0] >> 16) & 0x7fff;
         if (p[0] & 0x8000) set_color((uint16_t)diffuse);
         break;
-    case 0x31: specular = p[0] & 0x7fff; emission = (p[0] >> 16) & 0x7fff; break;
+    case 0x31: specular = p[0] & 0x7fff; use_shininess = (p[0] >> 15) & 1; emission = (p[0] >> 16) & 0x7fff; break;
+    case 0x34: for (int i = 0; i < 32; i++) for (int k = 0; k < 4; k++) shininess[i * 4 + k] = (uint8_t)(p[i] >> (8 * k)); break;
     case 0x32: {
         int l = p[0] >> 30;
         float lv[3];
@@ -337,7 +343,7 @@ static void run(uint8_t cmd, const uint32_t *p) {
     case 0x33: light_col[p[0] >> 30] = (uint16_t)(p[0] & 0x7fff); break;
     case 0x40: prim = p[0] & 3; nstrip = 0; vtx_count = 0; cur_attr = pending_attr; break;
     case 0x41: break;
-    case 0x50: swap_pending = 1; wbuffer = (p[0] >> 1) & 1; break;
+    case 0x50: swap_pending = 1; sort_manual = p[0] & 1; wbuffer = (p[0] >> 1) & 1; break;
     case 0x60:
         viewport[0] = (uint8_t)p[0]; viewport[1] = (uint8_t)(p[0] >> 8);
         viewport[2] = (uint8_t)(p[0] >> 16); viewport[3] = (uint8_t)(p[0] >> 24);
@@ -512,6 +518,12 @@ static uint32_t texel(uint32_t tp, uint32_t pb, int s, int t) {
 
 typedef struct { float x, y, z, iw, r, g, b, s, t; } SV;      /* screen-space vertex, attributes divided by w */
 
+/* Per-pixel attributes besides colour and depth */
+static uint8_t opaque_id[GPU3D_W * 192];     /* polygon ID of the opaque pixel, for edge marking and shadows */
+static uint8_t trans_id[GPU3D_W * 192];      /* ID of the last translucent polygon drawn here (0xff: none) */
+static uint8_t fog_flag[GPU3D_W * 192];
+static uint8_t stencil[GPU3D_W * 192];
+
 static void draw_triangle(const Poly *p, SV *a, SV *b, SV *c) {
     float area = (b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x);
     if (area == 0) return;
@@ -523,15 +535,17 @@ static void draw_triangle(const Poly *p, SV *a, SV *b, SV *c) {
     int y0 = (int)floorf(fminf(a->y, fminf(b->y, c->y))), y1 = (int)ceilf(fmaxf(a->y, fmaxf(b->y, c->y)));
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    if (x1 > 255) x1 = 255;
+    if (x1 > GPU3D_W - 1) x1 = GPU3D_W - 1;
     if (y1 > 191) y1 = 191;
     uint32_t alpha_attr = (p->attr >> 16) & 31;
     uint32_t fmt = (p->texparam >> 26) & 7, mode = (p->attr >> 4) & 3;
+    uint8_t id = (uint8_t)((p->attr >> 24) & 63);
     uint16_t disp = io16(0x60);
     int textures = (disp & 1) && fmt;
-    int alpha_test = disp & 4, blending = disp & 8;
+    int highlight = disp & 2, alpha_test = disp & 4, blending = disp & 8;
     uint32_t alpha_ref = io16(0x340) & 31;
     int depth_equal = p->attr & 0x4000, write_depth = !p->translucent || (p->attr & 0x800);
+    int shadow = mode == 3, fog = (p->attr >> 15) & 1;
     float inv = 1.0f / area;
     for (int y = y0; y <= y1; y++) {
         for (int x = x0; x <= x1; x++) {
@@ -549,12 +563,28 @@ static void draw_triangle(const Poly *p, SV *a, SV *b, SV *c) {
                 float zz = (w0 * a->z + w1 * b->z + w2 * c->z);
                 z = (uint32_t)fminf(fmaxf((zz * 0.5f + 0.5f) * 16777215.0f, 0), 16777215.0f);
             }
-            int i = y * 256 + x;
-            if (depth_equal ? (z > depth[i] + 0x200 || z + 0x200 < depth[i]) : z >= depth[i]) continue;
+            int i = y * GPU3D_W + x;
+            int pass = depth_equal ? !(z > depth[i] + 0x200 || z + 0x200 < depth[i]) : z < depth[i];
+            /* Shadow polygons: ID 0 marks where the shadow volume is hidden (fails the depth test); the others
+             * draw there, except on the polygon that casts them (same ID) */
+            if (shadow && id == 0) { if (!pass) stencil[i] = 1; continue; }
+            if (!pass) continue;
+            if (shadow) {
+                if (!stencil[i] || opaque_id[i] == id) continue;
+                stencil[i] = 0;
+            }
+            if (p->translucent && trans_id[i] == id) continue;   /* same translucent ID: no blending onto itself */
             float r = (w0 * a->r + w1 * b->r + w2 * c->r) * wv, g = (w0 * a->g + w1 * b->g + w2 * c->g) * wv,
                   bl = (w0 * a->b + w1 * b->b + w2 * c->b) * wv;
             int cr = (int)r, cg = (int)g, cb = (int)bl;
             int ca = alpha_attr ? (int)alpha_attr : 31;
+            int hr = 0, hg = 0, hb = 0;
+            if (mode == 2) {
+                /* Toon: the vertex colour's red picks a toon table entry; highlight adds it after texturing */
+                uint16_t toon = io16(0x380 + (uint32_t)(cr & 31) * 2);
+                if (highlight) { hr = toon & 31; hg = (toon >> 5) & 31; hb = (toon >> 10) & 31; }
+                else { cr = toon & 31; cg = (toon >> 5) & 31; cb = (toon >> 10) & 31; }
+            }
             if (textures) {
                 float s = (w0 * a->s + w1 * b->s + w2 * c->s) * wv, t = (w0 * a->t + w1 * b->t + w2 * c->t) * wv;
                 uint32_t tx = texel(p->texparam, p->palbase, (int)floorf(s), (int)floorf(t));
@@ -564,12 +594,13 @@ static void draw_triangle(const Poly *p, SV *a, SV *b, SV *c) {
                 if (mode == 1) {                                    /* decal */
                     cr = (tr * ta + cr * (31 - ta)) / 31; cg = (tg * ta + cg * (31 - ta)) / 31;
                     cb = (tb * ta + cb * (31 - ta)) / 31;
-                } else {                                            /* modulation */
+                } else {                                            /* modulation (also toon/highlight, shadow) */
                     cr = ((tr + 1) * (cr + 1) - 1) / 32; cg = ((tg + 1) * (cg + 1) - 1) / 32;
                     cb = ((tb + 1) * (cb + 1) - 1) / 32;
                     ca = ((ta + 1) * (ca + 1) - 1) / 32;
                 }
             }
+            cr += hr; cg += hg; cb += hb;
             if (alpha_test && (uint32_t)ca <= alpha_ref) continue;
             if (cr > 31) cr = 31;
             if (cg > 31) cg = 31;
@@ -583,12 +614,13 @@ static void draw_triangle(const Poly *p, SV *a, SV *b, SV *c) {
             }
             fb[i] = (uint32_t)(cr | cg << 5 | cb << 10) | (uint32_t)(ca ? ca : 1) << 16;
             if (write_depth) depth[i] = z;
+            if (p->translucent) { trans_id[i] = id; fog_flag[i] &= (uint8_t)fog; }
+            else { opaque_id[i] = id; fog_flag[i] = (uint8_t)fog; }
         }
     }
 }
 
-static void draw_poly(const Poly *p) {
-    SV sv[10];
+static void project(const Poly *p, SV *sv) {
     float vx0 = viewport[0], vy0 = viewport[1], vw = (float)(viewport[2] - viewport[0] + 1),
           vh = (float)(viewport[3] - viewport[1] + 1);
     for (int i = 0; i < p->n; i++) {
@@ -596,26 +628,159 @@ static void draw_poly(const Poly *p) {
         float w = v->w;
         if (w == 0) w = 0.00001f;
         float iw = 1 / w;
-        sv[i].x = (v->x * iw + 1) * vw / 2 + vx0;
+        sv[i].x = (v->x * iw + 1) * vw / 2 + vx0 + GPU3D_OFS;     /* widescreen margin on the left */
         sv[i].y = 192 - ((v->y * iw + 1) * vh / 2 + vy0);
         sv[i].z = v->z * iw;
         sv[i].iw = iw;
         sv[i].r = v->r * iw; sv[i].g = v->g * iw; sv[i].b = v->b * iw;
         sv[i].s = v->s * iw; sv[i].t = v->t * iw;
     }
+}
+
+static void draw_poly(const Poly *p) {
+    SV sv[10];
+    project(p, sv);
     for (int i = 1; i + 1 < p->n; i++) draw_triangle(p, &sv[0], &sv[i], &sv[i + 1]);
+}
+
+/* Translucent polygons are drawn bottom-most Y first unless SWAP_BUFFERS asked for manual order */
+static float sort_key[MAX_POLYS];
+static int cmp_translucent(const void *x, const void *y) {
+    int a = *(const int *)x, b = *(const int *)y;
+    if (sort_key[a] != sort_key[b]) return sort_key[a] < sort_key[b] ? -1 : 1;
+    return a - b;
+}
+
+static uint16_t blend15(uint16_t a, uint16_t b, int wa) {     /* wa of 32 parts a */
+    int r = ((a & 31) * wa + (b & 31) * (32 - wa)) / 32, g = (((a >> 5) & 31) * wa + ((b >> 5) & 31) * (32 - wa)) / 32,
+        bl = (((a >> 10) & 31) * wa + ((b >> 10) & 31) * (32 - wa)) / 32;
+    return (uint16_t)(r | g << 5 | bl << 10);
+}
+
+/* After all polygons: edge marking (DISP3DCNT bit 5), anti-aliasing (bit 4), fog (bit 7) */
+static void finish_frame(uint8_t clear_id) {
+    uint16_t disp = io16(0x60);
+    static uint32_t src[GPU3D_W * 192];
+    if (disp & 0x30) {
+        memcpy(src, fb, sizeof fb);
+        static const int dx[4] = {-1, 1, 0, 0}, dy[4] = {0, 0, -1, 1};
+        for (int y = 0; y < 192; y++)
+            for (int x = 0; x < GPU3D_W; x++) {
+                int i = y * GPU3D_W + x;
+                if (!((src[i] >> 16) & 31)) continue;
+                /* An edge: a neighbour with another polygon ID lies behind this pixel */
+                int edge = -1;
+                for (int k = 0; k < 4; k++) {
+                    int nx = x + dx[k], ny = y + dy[k];
+                    uint8_t nid = clear_id;
+                    uint32_t nd = 0xffffff;
+                    if (nx >= 0 && nx < GPU3D_W && ny >= 0 && ny < 192) { nid = opaque_id[ny * GPU3D_W + nx]; nd = depth[ny * GPU3D_W + nx]; }
+                    if (nid != opaque_id[i] && depth[i] < nd) { edge = k; break; }
+                }
+                if (edge < 0) continue;
+                uint32_t a = fb[i] & 0x1f0000;
+                if (disp & 0x20) {
+                    fb[i] = io16(0x330 + (uint32_t)(opaque_id[i] >> 3) * 2) | a;
+                } else {                                                  /* anti-aliasing: soften the edge */
+                    int nx = x + dx[edge], ny = y + dy[edge];
+                    if (nx >= 0 && nx < GPU3D_W && ny >= 0 && ny < 192 && ((src[ny * GPU3D_W + nx] >> 16) & 31))
+                        fb[i] = blend15((uint16_t)src[i], (uint16_t)src[ny * GPU3D_W + nx], 20) | a;
+                }
+            }
+    }
+    if (disp & 0x80) {
+        /* Fog: density from the 32-entry table at 0x04000360, indexed by depth past FOG_OFFSET in steps of
+         * 0x400 >> FOG_SHIFT, interpolated; colour and alpha move toward FOG_COLOR (only alpha with bit 6) */
+        uint32_t fc = io32(0x358);
+        uint16_t fog_color = (uint16_t)(fc & 0x7fff);
+        int fog_alpha = (fc >> 16) & 31, alpha_only = disp & 0x40, shift = (disp >> 8) & 15;
+        int offset = io16(0x35c) & 0x7fff, step = 0x400 >> shift;
+        for (int i = 0; i < GPU3D_W * 192; i++) {
+            if (!fog_flag[i] || !step) continue;
+            int z15 = (int)(depth[i] >> 9), d;
+            if (z15 <= offset) d = rc_io[0x360] & 0x7f;
+            else {
+                int pos = (z15 - offset) / step, frac = ((z15 - offset) % step) * 128 / step;
+                if (pos >= 31) d = rc_io[0x37f] & 0x7f;
+                else {
+                    int d0 = rc_io[0x360 + pos] & 0x7f, d1 = rc_io[0x361 + pos] & 0x7f;
+                    d = d0 + (d1 - d0) * frac / 128;
+                }
+            }
+            if (d >= 127) d = 128;
+            uint32_t p = fb[i];
+            int a = (p >> 16) & 31;
+            uint16_t c = (uint16_t)(p & 0x7fff);
+            if (!alpha_only) c = blend15(fog_color, c, d / 4);
+            a = (fog_alpha * d + a * (128 - d)) / 128;
+            fb[i] = c | (uint32_t)a << 16;
+        }
+    }
+}
+
+/* B2W2_LOG_3D=<frame>: list that frame's polygons in the log */
+static void log_polys(void) {
+    static int64_t want = -2;
+    if (want == -2) { const char *e = getenv("B2W2_LOG_3D"); want = e ? atoll(e) : -1; }
+    if (want < 0 || (int64_t)rc_frames != want) return;
+    rc_logf("3D frame %llu: %d polygons, DISP3DCNT %04x, lights %04x %04x %04x %04x, dif/amb %04x/%04x spe/emi %04x/%04x\n",
+            (unsigned long long)rc_frames, npolys, io16(0x60), light_col[0], light_col[1], light_col[2], light_col[3],
+            diffuse, ambient, specular, emission);
+    for (uint32_t pb = 0; pb < 0x6000; pb += 0x1000) {
+        rc_logf("  texpal %05x:", pb);
+        for (int k = 0; k < 8; k++) rc_logf(" %04x", pal_half(pb + (uint32_t)k * 2));
+        rc_logf("\n");
+    }
+    rc_logf("  VRAMCNT E %02x F %02x G %02x  A: DISPCNT %08x BLDCNT %04x BLDALPHA %04x BLDY %04x WIN %04x/%04x BG0CNT %04x\n",
+            rc_io[0x244], rc_io[0x245], rc_io[0x246], io32(0), io16(0x50), io16(0x52), io16(0x54), io16(0x48), io16(0x4a),
+            io16(8));
+    {
+        int lit = 0, black = 0;
+        for (int i = 0; i < GPU3D_W * 192; i++) {
+            uint32_t p = fb[i];
+            if ((p >> 16) & 31) { lit++; if (!(p & 0x7fff)) black++; }
+        }
+        rc_logf("  previous 3D frame: %d pixels drawn, %d of them black\n", lit, black);
+    }
+    if (npolys) {
+        rc_logf("  texels of poly 0:");
+        for (int k = 0; k < 8; k++) rc_logf(" %06x", texel(polys[0].texparam, polys[0].palbase, 64 + k * 2, 104 + k));
+        rc_logf("  slot3 %p\n", (void *)rc_tex_slot(3));
+    }
+    for (int i = 0; i < npolys && i < 40; i++) {
+        const Poly *p = &polys[i];
+        rc_logf("  poly %d: attr %08x tex %08x pal %04x n %d  v0 xyzw %.4f %.4f %.4f %.4f rgb %.0f %.0f %.0f st %.1f %.1f\n", i, p->attr, p->texparam,
+                p->palbase, p->n, p->v[0].x, p->v[0].y, p->v[0].z, p->v[0].w, p->v[0].r, p->v[0].g, p->v[0].b, p->v[0].s, p->v[0].t);
+    }
 }
 
 void gpu3d_swap(void) {
     if (!swap_pending) return;
     swap_pending = 0;
+    log_polys();
     uint32_t cc = io32(0x350);
     uint32_t clear = (cc & 0x7fff) | ((cc >> 16) & 31) << 16;
     uint32_t cd = (io16(0x354) & 0x7fff) * 0x200 + 0x1ff;
-    for (int i = 0; i < 256 * 192; i++) { fb[i] = clear; depth[i] = cd; }
-    for (int pass = 0; pass < 2; pass++)
-        for (int i = 0; i < npolys; i++)
-            if (polys[i].translucent == pass) draw_poly(&polys[i]);
+    uint8_t clear_id = (uint8_t)((cc >> 24) & 63);
+    for (int i = 0; i < GPU3D_W * 192; i++) {
+        fb[i] = clear; depth[i] = cd; opaque_id[i] = clear_id; trans_id[i] = 0xff;
+        fog_flag[i] = (uint8_t)((cc >> 15) & 1); stencil[i] = 0;
+    }
+    static int order[MAX_POLYS];
+    int nt = 0;
+    for (int i = 0; i < npolys; i++) if (!polys[i].translucent) draw_poly(&polys[i]);
+    for (int i = 0; i < npolys; i++) {
+        if (!polys[i].translucent) continue;
+        SV sv[10];
+        project(&polys[i], sv);
+        float ymax = sv[0].y;
+        for (int k = 1; k < polys[i].n; k++) if (sv[k].y > ymax) ymax = sv[k].y;
+        sort_key[i] = ymax;
+        order[nt++] = i;
+    }
+    if (!sort_manual) qsort(order, (size_t)nt, sizeof order[0], cmp_translucent);
+    for (int k = 0; k < nt; k++) draw_poly(&polys[order[k]]);
+    finish_frame(clear_id);
     npolys = 0;
 }
 

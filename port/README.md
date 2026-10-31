@@ -15,7 +15,14 @@ Needs Visual Studio 2022 with the C++ workload, Rust, and the dsd config/extract
 Writes `b2w2.sav` (save chip), `b2w2.fw` (firmware, once the game writes to it) and `b2w2.log` next to where it runs.
 
 **Controls:** arrows = D-pad, X = A, Z = B, S = X, A = Y, Q = L, W = R, Enter = Start, Backspace = Select,
-mouse on the lower screen = stylus, hold Tab = fast forward, Esc = quit.
+mouse on the touch screen = stylus, hold Tab = fast forward (as fast as it goes), F8 = speed 1x / 2x / 4x / 8x
+(shown in the title bar), Esc = leave fullscreen / quit.
+
+**Display:** F11 or Alt+Enter = fullscreen, F10 = layout (stacked / big top screen with the touch screen inset /
+side by side / top screen only), F9 = widescreen on/off. The window can be resized; the picture keeps its aspect ratio.
+**Widescreen** (on by default) draws the 3D world 342 pixels wide (16:9) at the same scale, so more of the world
+shows at the sides; 2D (menus, text boxes) stays in the middle 256 pixels. The game still culls objects it thinks
+are off screen, so some can pop in at the edges.
 
 **Testing switches** (environment variables):
 
@@ -26,7 +33,11 @@ mouse on the lower screen = stylus, hold Tab = fast forward, Esc = quit.
 | `B2W2_INPUT=4300:START,4700:A,6820:T128x150` | hold a button (or touch x,y) for 6 frames from a frame |
 | `B2W2_WATCHDOG=1` (or `2`) | progress every 2 s from a host thread (`2`: also samples guest registers) |
 | `B2W2_REGDUMP=1` | display registers in the log with each screenshot |
-| `B2W2_LOG_PXI=1`, `B2W2_LOG_THREADS=1`, `B2W2_LOG_KEYS=1`, `B2W2_CHECK_SP=1` | more logging |
+| `B2W2_WAV=out.wav` | also write the sound to a WAV file |
+| `B2W2_FULLSCREEN=1` | start in fullscreen |
+| `B2W2_LOG_3D=<frame>`, `B2W2_SND_STATS=<from>-<to>` | that frame's polygons; sequence events per player between two frames |
+| `B2W2_LOG_NOTES=<from>-<to>`, `B2W2_SND_STATE=n` | notes started between two frames; sound players' state every n frames |
+| `B2W2_LOG_PXI=1`, `B2W2_LOG_SND=1`, `B2W2_LOG_THREADS=1`, `B2W2_LOG_KEYS=1`, `B2W2_CHECK_SP=1` | more logging |
 | `RECOMP_CHECK_SP=1` (when building) | generated code checks every call leaves sp alone |
 
 ## Pieces
@@ -35,11 +46,12 @@ mouse on the lower screen = stylus, hold Tab = fast forward, Esc = quit.
 | `tools/recomp/` | Recompiler (Rust, on unarm, the decoder dsd uses). Reads `extract/w2` binaries and the function symbols in `config/w2`, follows each function's control flow from its start, and writes `build/w2/port/gen/*.c`, prototypes, per-module address→function tables and the overlays' bytes. `recomp dis <file> <base> <start> <end> arm\|thumb` disassembles code no config covers. |
 | `port/runtime/runtime.c` | CPU state and banked modes, memory through a 4 KB page table (main RAM, WRAM, TCMs as CP15 sets them, VRAM banks from VRAMCNT, palette, OAM), I/O registers, DMA, divider/sqrt, CP15, PSR, BIOS SWIs, dispatch for indirect calls, boot. |
 | `port/runtime/sched.c` | Time (scanlines, VBlank, timers), interrupts delivered like the BIOS does, Halt/IntrWait, and guest threads on Windows fibers. |
-| `port/runtime/arm7.c` | High-level stand-in for the ARM7: boot/IPC/shared-RAM handshakes, VBlank counter, PXI services (power, clock, touch, firmware NVRAM, save chip, sound bookkeeping). Each behaviour cites the ARM9 code it answers. |
+| `port/runtime/arm7.c` | High-level stand-in for the ARM7: boot/IPC/shared-RAM handshakes, VBlank counter, PXI services (power, clock, touch, microphone, firmware NVRAM, save chip, sound commands, wireless refused as switched off). Each behaviour cites the ARM9 code it answers. |
+| `port/runtime/snd.c` | The sound driver: SSEQ sequencer over the SBNK banks and SWAR wave archives in RAM, PCM8/PCM16/ADPCM/PSG/noise voices with ADSR, modulation and portamento, the channels the game drives directly (cries), alarms, the status the game reads, and a 32768 Hz stereo mixer. |
 | `port/runtime/card.c` | Game card bus: ROM reads and chip ID from the ROM file, card-timed DMA. The game's own file system loads files and overlays through it. |
-| `port/runtime/render.c` | Both 2D engines: text/affine/extended BGs, sprites, windows, blending, master brightness, VRAM display, display capture, the 3D layer. |
-| `port/runtime/gpu3d.c` | 3D engine: geometry commands and a software rasterizer with all texture formats. |
-| `port/runtime/frontend.c` | Window, input, 60 Hz pacing, screenshots, scripted input. |
+| `port/runtime/render.c` | Both 2D engines, drawn line by line with the registers of the moment (HBlank DMA and mid-frame changes show): text/affine/extended BGs, sprites, windows, blending, master brightness, VRAM display, display capture, the 3D layer. |
+| `port/runtime/gpu3d.c` | 3D engine: geometry commands and a software rasterizer: all texture formats, lighting with the shininess table, toon/highlight, shadow polygons, translucent sorting, edge marking, fog, anti-aliasing (approximated). |
+| `port/runtime/frontend.c` | Window, input, audio output (waveOut), 60 Hz pacing, screenshots, scripted input. |
 | `port/code_copies.txt` | Code the game copies before running it, recompiled at its run address. |
 
 ## How the translation works
@@ -52,16 +64,16 @@ mouse on the lower screen = stylus, hold Tab = fast forward, Esc = quit.
 
 ## Status (2026-10-30)
 - 352 modules, 42,810 functions, 1.57 million instructions recompiled; no unsupported instructions.
-- Boots, plays the opening movie (2D and 3D), shows the title screen (3D Kyurem with motion-blur capture), takes
-  Start, runs the professor's introduction and naming, the Aspertia City cutscene, and the player's room, where the
-  player can walk. Tested headless through 48,000 frames (about 13 minutes of game time) without a crash; headless it
-  runs at about 100 frames a second.
+- Boots, plays the opening movie (2D and 3D) with music, shows the title screen (3D Kyurem with motion-blur
+  capture), takes Start, runs the professor's introduction and naming, the Aspertia City cutscene, and the player's
+  house (Mum's entrance cutscene included), where the player can walk. Tested headless through 48,000 frames (about 13 minutes of game time) without a
+  crash.
 
-## Not done
-- **Sound.** The ARM7's sound driver is only stood in for: command lists are acknowledged, nothing plays. Needs an
-  SDAT sequencer (SSEQ/SBNK/SWAR) and a mixer, then a Windows audio output.
-- **3D:** toon/highlight shading, fog, edge marking, anti-aliasing, translucent polygon sorting, shadow polygons.
-- **2D:** mid-frame register changes (HBlank effects) aren't seen: each frame is drawn from the state at VBlank.
-- **ARM7:** microphone, wireless (WM/WFC), and anything the game asks for later in the story.
+## Not done / approximate
+- **Sound** follows the SDAT format and the SDK's command layout as observed, but envelopes, volume curves and
+  modulation are approximations, and sound capture (the reverb effect) is not emulated.
+- **3D anti-aliasing** softens polygon edges toward what is behind them rather than computing coverage.
+- **Wireless** is refused, as with wireless switched off: no C-Gear connections, trades or battles. The
+  **microphone** answers but records silence.
 - **Timing** is approximate (loop cost per tick); a game that relies on cycle counts may misbehave.
 - Only White 2 (JP); Black 2 needs a DSi-mode redump.
