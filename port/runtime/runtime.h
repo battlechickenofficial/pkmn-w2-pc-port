@@ -10,6 +10,7 @@ typedef struct Cpu {
     uint32_t spsr;
     uint32_t bank_sp[6], bank_lr[6], bank_spsr[6];
     int64_t budget;             /* backward branches left before rc_tick */
+    uint32_t ret_to;            /* where the last return went, for thread functions that return */
 } Cpu;
 
 typedef void (*RcFn)(Cpu *c);
@@ -21,6 +22,8 @@ typedef struct {
     uint32_t start, end;
     const RcFunc *funcs;
     uint32_t count;
+    const uint32_t *data;       /* overlays: the module's bytes, to tell which overlay is in memory */
+    uint32_t sig_len;           /* how many bytes at the start to compare */
 } RcModule;
 extern const RcModule rc_modules[];
 extern const int rc_module_count;
@@ -160,7 +163,11 @@ uint32_t rc_get_cpsr(Cpu *c);
 uint32_t rc_get_spsr(Cpu *c);
 void rc_msr(Cpu *c, int spsr, uint32_t mask, uint32_t v);
 void rc_exception_return(Cpu *c);
+void rc_set_cpsr(Cpu *c, uint32_t cpsr);
+uint32_t rc_get_user_reg(Cpu *c, int r);
+void rc_set_user_reg(Cpu *c, int r, uint32_t v);
+void rc_check_sp(Cpu *c, uint32_t sp0, uint32_t target);
 
 /* Generated code calls TICK on every backward branch, so loops reach the runtime now and then */
 #define TICK(addr) do { if (--c->budget < 0) rc_tick(c, addr); } while (0)
-#define RET(v) do { (void)(v); return; } while (0)
+#define RET(v) do { c->ret_to = (v); return; } while (0)

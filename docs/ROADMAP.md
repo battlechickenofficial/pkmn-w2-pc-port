@@ -67,8 +67,8 @@ Order by payoff: Nitro SDK and libc (largely shared with other DS decomps) → G
 ## Stage 3: Windows build: static recompilation (in progress)
 Chosen route (2026-10-30): static recompilation instead of waiting for matching C. See [port/README.md](../port/README.md).
 - `tools/recomp` turns the dsd-described ARM9 modules into C (219,642 instructions, no unsupported ones). `port/build.py` compiles them with MSVC into `b2w2.exe`.
-- The runtime boots White 2 through crt0, SDK OS/PXI init and card reads up to the first thread wait.
-- Next: interrupts, guest threads on host fibers, ARM7 PXI services, overlays, then graphics, sound and input through SDL/OpenGL.
+- `b2w2.exe` runs White 2 in a window: opening movie, title screen, introduction, and the first rooms with the player walking (2D, 3D, input, saves). Interrupts, threads (on fibers), all overlays and the ARM7 services the game has asked for so far are in place.
+- Next: sound (SDAT sequencer and mixer), the rest of the 3D features, mid-frame 2D effects, wireless and microphone stand-ins.
 
 Matching decompilation (Stage 2) can continue alongside: a decompiled function can replace its recompiled counterpart one at a time.
 

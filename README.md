@@ -3,7 +3,7 @@
 Decompilation workspace for Pocket Monsters Black 2 / White 2 (Japan, Rev 1), aimed at a native Windows build.
 Black / White (Japan) assets are extracted alongside for a later merge.
 
-**Current stage:** White 2 links from dsd-delinked objects with Metrowerks `mwldarm` and rebuilds byte-identical. The Windows port (static recompilation, [port/](port/README.md)) boots the recompiled ARM9 up to the first thread wait. Black 2 is waiting on a DSi-mode redump. See [docs/ROADMAP.md](docs/ROADMAP.md).
+**Current stage:** White 2 links from dsd-delinked objects with Metrowerks `mwldarm` and rebuilds byte-identical. The Windows port (static recompilation, [port/](port/README.md)) runs the game in a window from the opening movie into the first rooms; sound is still missing. Black 2 is waiting on a DSi-mode redump. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Layout
 ```

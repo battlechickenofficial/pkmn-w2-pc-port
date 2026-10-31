@@ -230,19 +230,22 @@ fn writes_pc(ins: &Ins) -> bool {
 
 impl FuncCode {
     /// Finds the bound of a jump table from a `cmp rX, #n` shortly before it
+    /// The largest `cmp rX, #n` in the straight-line code before it. Range checks often come with sign checks
+    /// (cmp r0, #0), so the largest is the likeliest bound; entries past the real end are cut off by the caller.
     fn table_bound(&self, addr: u32) -> Option<u32> {
         let mut a = addr;
+        let mut best = None;
         for _ in 0..12 {
-            let (&prev, d) = self.insns.range(..a).next_back()?;
+            let Some((&prev, d)) = self.insns.range(..a).next_back() else { break };
             if prev + d.size != a {
-                return None;
+                break;
             }
             if let Ins::Cmp { op2: Op2::Imm(Op2Imm { imm, .. }), .. } = d.ins {
-                return Some(imm + 1);
+                best = Some(best.unwrap_or(0).max(imm + 1));
             }
             a = prev;
         }
-        None
+        best
     }
 }
 
@@ -251,15 +254,24 @@ fn flow(m: &Module, f: &FuncCode, addr: u32, d: &Decoded) -> Flow {
     let thumb = f.thumb;
     match &d.ins {
         B { target, .. } => Flow::Branch(target.addr),
+        // Thumb BL to another point in the same function: a jump too far for B, not a call
+        Bl { target, .. } if thumb && target.addr != f.start && target.addr > f.start && target.addr < f.end => {
+            Flow::Branch(target.addr)
+        }
         // add pc, pc, rX, lsl #2 followed by a row of branches
         Add { rd: Reg::Pc, rn: Reg::Pc, op2: Op2::ShiftImm(ShiftImm { shift_op: ShiftOp::Lsl, imm: 2, .. }), .. }
             if !thumb =>
         {
-            let n = f.table_bound(addr).unwrap_or_else(|| {
-                (0..256).take_while(|i| matches!(decode(m, addr + 8 + 4 * i, false), Some(Decoded { ins: B { .. }, .. })))
-                    .count() as u32
-            });
-            Flow::Table((0..n).map(|i| addr + 8 + 4 * i).collect())
+            let is_b = |a: u32| matches!(decode(m, a, false), Some(Decoded { ins: B { .. }, .. }));
+            let n = f.table_bound(addr).unwrap_or_else(|| (0..256).take_while(|i| is_b(addr + 8 + 4 * i)).count() as u32);
+            if n > 0 && (0..n).all(|i| is_b(addr + 8 + 4 * i)) {
+                Flow::Table((0..n).map(|i| addr + 8 + 4 * i).collect())
+            } else {
+                // Not a row of branches: a jump into straight-line code (libc's unrolled division). Any code word up
+                // to the end of the function can be the target.
+                let pools = literal_pool(m, f.start, f.end);
+                Flow::Table((addr + 8..f.end).step_by(4).filter(|a| !pools.contains(a)).collect())
+            }
         }
         // add pc, rX after a table of 16-bit offsets relative to the end of the instruction
         Add { rd: Reg::Pc, rn: Reg::Pc, op2: Op2::ShiftImm(ShiftImm { imm: 0, shift_op: ShiftOp::Lsl, .. }), .. }
@@ -292,6 +304,19 @@ fn flow(m: &Module, f: &FuncCode, addr: u32, d: &Decoded) -> Flow {
         ins if writes_pc(ins) => Flow::Exit,
         _ => Flow::Next,
     }
+}
+
+/// Words an ARM function loads PC-relative (its literal pool), from a linear pass over it
+fn literal_pool(m: &Module, start: u32, end: u32) -> BTreeSet<u32> {
+    let mut pools = BTreeSet::new();
+    for a in (start..end).step_by(4) {
+        if let Some(Decoded { ins: Ins::Ldr { addr: AddrLdrStr::Pre { rn: Reg::Pc, offset: LdrStrOffset::Imm(o), .. }, .. }, .. }) =
+            decode(m, a, false)
+        {
+            pools.insert((a + 8).wrapping_add(o as u32));
+        }
+    }
+    pools
 }
 
 fn analyze(m: &Module, module: usize, start: u32, end: u32, thumb: bool, extra_roots: &[u32]) -> FuncCode {
@@ -510,10 +535,26 @@ impl Emitter<'_> {
 
     fn call(&mut self, target: u32, thumb_target: bool) {
         let mi = self.f().module;
+        // RECOMP_CHECK_SP=1: debug builds check that every call leaves sp where it was
+        let check = std::env::var_os("RECOMP_CHECK_SP").is_some();
+        if check {
+            self.out.push_str("    t2 = c->r[13];\n");
+        }
         match self.prog.callee(mi, target) {
             Some(name) => writeln!(self.out, "    {name}(c);").unwrap(),
             None => writeln!(self.out, "    rc_call(c, 0x{:08x}u);", target | thumb_target as u32).unwrap(),
         }
+        if check {
+            writeln!(self.out, "    rc_check_sp(c, t2, 0x{target:08x}u);").unwrap();
+        }
+    }
+
+    /// A BL: call, then handle a BL used as a long branch (Thumb B only reaches 2 KB, so MWCC jumps into code it
+    /// shares with another function with BL). That code returns from *our* frame, to our caller: return too.
+    fn bl(&mut self, target: u32, thumb_target: bool, ret: u32) {
+        writeln!(self.out, "    c->r[14] = 0x{ret:08x}u; c->ret_to = 0;").unwrap();
+        self.call(target, thumb_target);
+        writeln!(self.out, "    if (c->ret_to && c->ret_to != 0x{ret:08x}u && (c->ret_to & ~1u) == (ra & ~1u)) return;").unwrap();
     }
 
     /// A computed value written to PC: a return, a jump table, or an indirect tail call
@@ -530,9 +571,13 @@ impl Emitter<'_> {
         } else if is_return {
             writeln!(self.out, "    RET({value});").unwrap();
         } else {
-            // Jumping to our own return address is a return, e.g. mov r12, lr ... bx r12
-            writeln!(self.out, "    if ((({value}) & ~1u) == (ra & ~1u)) return;").unwrap();
-            writeln!(self.out, "    rc_call(c, {value}); return;").unwrap();
+            // Jumping to our own return address is a return, e.g. mov r12, lr ... bx r12. Otherwise it's a tail call;
+            // if lr was changed first (ldr lr, =X; bx r0), the callee returns to X, which then runs in our place.
+            writeln!(self.out, "    t2 = {value};
+    if ((t2 & ~1u) == (ra & ~1u)) RET(t2);").unwrap();
+            writeln!(self.out, "    rc_call(c, t2);").unwrap();
+            writeln!(self.out, "    while (c->ret_to && (c->ret_to & ~1u) != (ra & ~1u)) rc_call(c, c->ret_to);").unwrap();
+            writeln!(self.out, "    return;").unwrap();
         }
     }
 
@@ -664,16 +709,27 @@ impl Emitter<'_> {
         writeln!(self.out, "    t = {} + (uint32_t)({delta});", self.rv(rn, addr)).unwrap();
         let mut off = 0;
         let mut pc = false;
+        // LDM/STM with ^ and no PC transfers the user mode registers: sp and lr come from the user bank
+        let user_bank = user && !(load && regs.contains(Reg::Pc));
         for reg in regs.iter() {
+            let banked = user_bank && matches!(reg, Reg::Sp | Reg::Lr);
             if load {
                 if reg == Reg::Pc {
                     writeln!(self.out, "    t2 = rd32(ea + {off});").unwrap();
                     pc = true;
+                } else if banked {
+                    writeln!(self.out, "    rc_set_user_reg(c, {}, rd32(ea + {off}));", reg as u8).unwrap();
                 } else {
                     writeln!(self.out, "    {} = rd32(ea + {off});", r(reg)).unwrap();
                 }
             } else {
-                let v = if reg == Reg::Pc { format!("0x{:08x}u", addr + 12) } else { r(reg) };
+                let v = if reg == Reg::Pc {
+                    format!("0x{:08x}u", addr + 12)
+                } else if banked {
+                    format!("rc_get_user_reg(c, {})", reg as u8)
+                } else {
+                    r(reg)
+                };
                 writeln!(self.out, "    wr32(ea + {off}, {v});").unwrap();
             }
             off += 4;
@@ -874,20 +930,22 @@ impl Emitter<'_> {
             Ldm { mode, rn, writeback, regs, user_mode, .. } => {
                 self.block(addr, *mode, *rn, *writeback, *regs, true, *user_mode)
             }
-            Stm { mode, rn, writeback, regs, .. } => self.block(addr, *mode, *rn, *writeback, *regs, false, false),
+            Stm { mode, rn, writeback, regs, user_mode, .. } => {
+                self.block(addr, *mode, *rn, *writeback, *regs, false, *user_mode)
+            }
             Push { regs, .. } => self.block(addr, LdmStmMode::Db, Reg::Sp, true, *regs, false, false),
             Pop { regs, .. } => self.block(addr, LdmStmMode::Ia, Reg::Sp, true, *regs, true, false),
 
             B { target, .. } => self.goto_or_exit(target.addr, addr),
-            Bl { target, .. } => {
-                writeln!(self.out, "    c->r[14] = 0x{:08x}u;", next | thumb as u32).unwrap();
-                self.call(target.addr, thumb);
+            Bl { target, .. } if thumb && target.addr > self.f().start && target.addr < self.f().end => {
+                writeln!(self.out, "    c->r[14] = 0x{:08x}u;", next | 1).unwrap();
+                self.goto_or_exit(target.addr, addr);
             }
+            Bl { target, .. } => self.bl(target.addr, thumb, next | thumb as u32),
             Blx { target: BlxTarget::Direct(t), .. } => {
-                writeln!(self.out, "    c->r[14] = 0x{:08x}u;", next | thumb as u32).unwrap();
                 // BLX immediate switches state; from Thumb the target is word aligned
                 let tgt = if thumb { t.addr & !3 } else { t.addr };
-                self.call(tgt, !thumb);
+                self.bl(tgt, !thumb, next | thumb as u32);
             }
             Blx { target: BlxTarget::Indirect(rm), .. } => {
                 writeln!(self.out, "    t = {};\n    c->r[14] = 0x{:08x}u;\n    rc_call(c, t);", self.rv(*rm, addr),
@@ -985,6 +1043,15 @@ impl Emitter<'_> {
 
 // ------------------------------------------------------------------ driver
 
+/// Leaves files whose content didn't change alone, so the C compiler only rebuilds what did
+fn write_if_changed(path: &Path, content: impl AsRef<[u8]>) {
+    let content = content.as_ref();
+    if fs::read(path).is_ok_and(|old| old == content) {
+        return;
+    }
+    fs::write(path, content).unwrap();
+}
+
 /// `recomp dis <file> <base> <start> <end> arm|thumb`: print unarm's decode of a range, for reading code that no dsd
 /// config covers (the ARM7, copied code)
 fn dis(args: &[String]) {
@@ -1054,7 +1121,7 @@ fn main() {
         chunk_funcs += 1;
         if chunk.len() > 4 << 20 || chunk_funcs >= 1500 {
             let n = format!("rec_{:03}.c", files.len());
-            fs::write(out.join(&n), format!("{header}{chunk}")).unwrap();
+            write_if_changed(&out.join(&n), format!("{header}{chunk}"));
             files.push(n);
             chunk.clear();
             chunk_funcs = 0;
@@ -1064,7 +1131,7 @@ fn main() {
     }
     if !chunk.is_empty() {
         let n = format!("rec_{:03}.c", files.len());
-        fs::write(out.join(&n), format!("{header}{chunk}")).unwrap();
+        write_if_changed(&out.join(&n), format!("{header}{chunk}"));
         files.push(n);
     }
 
@@ -1073,7 +1140,7 @@ fn main() {
     for name in prog.names.values() {
         writeln!(h, "void {name}(Cpu *c);").unwrap();
     }
-    fs::write(out.join("funcs.h"), h).unwrap();
+    write_if_changed(&out.join("funcs.h"), h);
 
     let mut t = String::from("#include \"runtime.h\"\n#include \"funcs.h\"\n\n");
     let mut counts = vec![0usize; prog.modules.len()];
@@ -1089,17 +1156,35 @@ fn main() {
         }
         t.push_str("};\n");
     }
+    // Overlays share addresses, so the runtime compares memory with their bytes to see which one is loaded
+    let mut d = String::from("#include <stdint.h>\n\n");
+    for m in prog.modules.iter().filter(|m| m.overlay.is_some()) {
+        writeln!(d, "const uint32_t data_{}[] = {{", m.name).unwrap();
+        for (i, w) in m.data.chunks(4).enumerate() {
+            let mut b = [0u8; 4];
+            b[..w.len()].copy_from_slice(w);
+            write!(d, "0x{:x},{}", u32::from_le_bytes(b), if i % 16 == 15 { "\n" } else { "" }).unwrap();
+        }
+        d.push_str("};\n");
+        writeln!(t, "extern const uint32_t data_{}[];", m.name).unwrap();
+    }
+    write_if_changed(&out.join("overlay_data.c"), d);
     t.push_str("\nconst RcModule rc_modules[] = {\n");
     for (mi, m) in prog.modules.iter().enumerate() {
         let table = if counts[mi] > 0 { format!("table_{}", m.name) } else { "NULL".to_string() };
-        writeln!(t, "    {{\"{}\", {}, 0x{:08x}u, 0x{:08x}u, 0x{:08x}u, {table}, {}}},", m.name,
+        let (data, sig) = if m.overlay.is_some() {
+            (format!("data_{}", m.name), m.data.len().min(32))
+        } else {
+            ("NULL".to_string(), 0)
+        };
+        writeln!(t, "    {{\"{}\", {}, 0x{:08x}u, 0x{:08x}u, 0x{:08x}u, {table}, {}, {data}, {sig}}},", m.name,
                  m.overlay.map(|i| i as i64).unwrap_or(-1), m.copy_src.unwrap_or(0), m.base, m.end(),
                  counts[mi]).unwrap();
     }
     writeln!(t, "}};\nconst int rc_module_count = {};", prog.modules.len()).unwrap();
-    fs::write(out.join("tables.c"), t).unwrap();
+    write_if_changed(&out.join("tables.c"), t);
 
-    fs::write(out.join("files.txt"), files.join("\n") + "\n").unwrap();
+    write_if_changed(&out.join("files.txt"), files.join("\n") + "\n");
     eprintln!("recomp: {} modules, {} functions/entries, {} instructions, {} C files", prog.modules.len(),
               prog.names.len(), total_insns, files.len());
 }
