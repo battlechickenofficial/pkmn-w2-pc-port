@@ -3,11 +3,11 @@
  *
  * Keys: arrows = D-pad, X = A, Z = B, S = X, A = Y, Q = L, W = R, Enter = Start, Backspace = Select,
  *       mouse on the touch screen = stylus, Tab (held) = fast forward, F8 = speed 1x/2x/4x/8x, F11 or Alt+Enter = fullscreen,
- *       F10 = layout (stacked, big top screen, side by side, top screen only), F9 = widescreen on/off, Esc = leave fullscreen / quit.
+ *       F10 = layout (stacked, big top screen, side by side, top screen only), F9 = widescreen on/off, Esc = leave fullscreen / quit,
+ *       F7 (or the title menu's extra item, titlemenu.c) = play another save file.
  * B2W2_HEADLESS=1 runs without a window; B2W2_SHOT_EVERY=n saves shot_<frame>.png every n frames. */
 #include "internal.h"
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include "saves.h"
 #include <mmsystem.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -17,9 +17,14 @@ static HWND wnd;
 static LARGE_INTEGER freq, next_frame;
 static int touch_down, touch_x, touch_y, quitting;
 static int shot_every;
+static uint64_t shot_from;                /* B2W2_SHOT_FROM: no screenshots before this frame */
 static int speed = 1;                    /* F8: 1, 2, 4 or 8 times as fast */
+static int to_menu;                      /* restarted on another save file: press Start, unpaced, until the title menu */
+static int want_load;                    /* the title menu's save-file item or F7: open the picker next frame */
+static int swallow_keys;                 /* after the picker: the game doesn't see keys until they are let go */
 
 void arm7_save_flush(void);
+int title_menu_keys(uint16_t *keys);
 void snd_mix(int16_t *out, int n);
 
 /* ------------------------------------------------------------------ audio */
@@ -60,7 +65,7 @@ static void audio_frame(void) {
     sample_frac -= n;
     WAVEHDR *h = &hdrs[next_buf];
     int free_buf = !wave || !(h->dwFlags & WHDR_PREPARED) || (h->dwFlags & WHDR_DONE);
-    int16_t *out = free_buf ? bufs[next_buf] : NULL;
+    int16_t *out = free_buf && !to_menu ? bufs[next_buf] : NULL;
     static int16_t scratch[1200 * 2];
     snd_mix(out ? out : scratch, n);
     if (wav_dump) fwrite(out ? out : scratch, 4, (size_t)n, wav_dump);
@@ -246,6 +251,19 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_KEYDOWN: case WM_SYSKEYDOWN:
         if (wp == VK_F11 || (wp == VK_RETURN && (lp & (1 << 29)))) { set_fullscreen(!fullscreen); return 0; }
+        if (picker_active()) {
+            /* a key already held when the picker opened (the game's A that confirmed the save) only repeats: not a choice */
+            int held = (lp & (1 << 30)) && (wp == VK_RETURN || wp == 'X' || wp == 'Z' || wp == VK_ESCAPE);
+            if (held) return 0;
+            if (wp == VK_UP) picker_key(PK_UP);
+            else if (wp == VK_DOWN) picker_key(PK_DOWN);
+            else if (wp == VK_LEFT || wp == 'Q') picker_key(PK_PAGE_UP);
+            else if (wp == VK_RIGHT || wp == 'W') picker_key(PK_PAGE_DOWN);
+            else if (wp == 'X' || wp == VK_RETURN) picker_key(PK_A);
+            else if (wp == 'Z' || wp == VK_ESCAPE || wp == VK_BACK) picker_key(PK_B);
+            return 0;
+        }
+        if (wp == VK_F7) { want_load = 1; return 0; }
         if (wp == VK_F10) { layout = (layout + 1) % 4; return 0; }
         if (wp == VK_F9) { widescreen = !widescreen; return 0; }
         if (wp == VK_F8) { speed = speed == 8 ? 1 : speed * 2; set_title(); return 0; }
@@ -258,6 +276,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: case WM_MOUSEMOVE: case WM_LBUTTONUP: {
         /* Wherever the touch screen is drawn, map the cursor into its 256 x 192 */
         int mx = (short)LOWORD(lp), my = (short)HIWORD(lp);
+        if (picker_active()) return 0;
         int w = bot_rect.right - bot_rect.left, hh = bot_rect.bottom - bot_rect.top;
         int inside = w > 0 && hh > 0 && mx >= bot_rect.left && mx < bot_rect.right && my >= bot_rect.top &&
                      my < bot_rect.bottom;
@@ -279,6 +298,10 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 void fe_init(void) {
     const char *e = getenv("B2W2_SHOT_EVERY");
     shot_every = e ? atoi(e) : 0;
+    if ((e = getenv("B2W2_SHOT_FROM"))) shot_from = strtoull(e, NULL, 10);
+    saves_init();
+    to_menu = getenv("B2W2_TO_MENU") != NULL;
+    SetEnvironmentVariableA("B2W2_TO_MENU", NULL);
     if (getenv("B2W2_HEADLESS")) { audio_init(); return; }
     SetProcessDPIAware();
     WNDCLASSA wc = {0};
@@ -289,14 +312,126 @@ void fe_init(void) {
     RegisterClassA(&wc);
     RECT r = {0, 0, GPU3D_W * 2, 384 * 2};
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    wnd = CreateWindowA("b2w2", "Pocket Monsters White 2  (F11 fullscreen, F10 layout, F9 widescreen, F8 speed)",
-                        WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left,
+    wnd = CreateWindowA("b2w2", "", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left,
                         r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
+    /* Restarted on another save file: the window as it was */
+    WINDOWPLACEMENT wp = {sizeof wp};
+    int fs = 0;
+    const char *w = getenv("B2W2_WINDOW");
+    if (w && sscanf(w, "%ld %ld %ld %ld %u %d %d %d %d", &wp.rcNormalPosition.left, &wp.rcNormalPosition.top,
+                    &wp.rcNormalPosition.right, &wp.rcNormalPosition.bottom, &wp.showCmd, &fs, &layout, &widescreen,
+                    &speed) == 9)
+        SetWindowPlacement(wnd, &wp);
+    else
+        ShowWindow(wnd, SW_SHOW);
+    set_title();
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&next_frame);
     timeBeginPeriod(1);
     audio_init();
-    if (getenv("B2W2_FULLSCREEN")) set_fullscreen(1);
+    if (getenv("B2W2_FULLSCREEN") || fs) set_fullscreen(1);
+}
+
+/* Play another save file: the game reads its save chip as it boots, so start again on the new file, in the same
+ * window state, and press through to the title menu */
+static void switch_save(const char *name) {
+    arm7_save_flush();
+    saves_set_current(name);
+    WINDOWPLACEMENT wp = {sizeof wp};
+    if (fullscreen) wp = saved_place;
+    else GetWindowPlacement(wnd, &wp);
+    char env[160];
+    sprintf(env, "%ld %ld %ld %ld %u %d %d %d %d", wp.rcNormalPosition.left, wp.rcNormalPosition.top,
+            wp.rcNormalPosition.right, wp.rcNormalPosition.bottom, wp.showCmd == SW_SHOWMAXIMIZED ? SW_SHOWMAXIMIZED :
+            SW_SHOWNORMAL, fullscreen, layout, widescreen, speed);
+    SetEnvironmentVariableA("B2W2_WINDOW", env);
+    SetEnvironmentVariableA("B2W2_TO_MENU", "1");
+    STARTUPINFOW si = {sizeof si};
+    PROCESS_INFORMATION pi;
+    if (CreateProcessW(NULL, GetCommandLineW(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        ExitProcess(0);
+    }
+    rc_logf("couldn't restart on save file %s (error %lu)\n", name, GetLastError());
+}
+
+/* The picker, drawn on the screens of the paused game, until the user chooses. 1 and the file's name, or -1.
+ * Without a window it is drawn once to picker.png and cancelled (for testing). */
+static int run_picker(int mode, char name[64]) {
+    static uint32_t keep_top[GPU3D_W * 192], keep_bot[GPU3D_W * 192];
+    memcpy(keep_top, scr_top, sizeof keep_top);
+    memcpy(keep_bot, scr_bot, sizeof keep_bot);
+    picker_open(mode);
+    int r;
+    if (!wnd) {
+        static uint32_t both[GPU3D_W * 384];
+        picker_render(both, both + GPU3D_W * 192);
+        write_png("picker.png", both, GPU3D_W, 384);
+        picker_close();
+        return -1;
+    }
+    /* at the game's frame rate, mixing sound as it goes: the music carries on, and the menu sounds play */
+    LONGLONG period = freq.QuadPart * 560190 / RC_CLOCK;
+    LARGE_INTEGER next, now;
+    QueryPerformanceCounter(&next);
+    int linger = -1;                     /* after choosing a file to play: a moment for its sound before the restart */
+    for (;;) {
+        MSG m;
+        while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageA(&m); }
+        memcpy(scr_top, keep_top, sizeof keep_top);
+        memcpy(scr_bot, keep_bot, sizeof keep_bot);
+        if (picker_active()) picker_render(scr_top, scr_bot);
+        present();
+        audio_frame();
+        r = picker_result(name);
+        if (r && linger < 0) linger = mode == PICK_LOAD && r == 1 ? 20 : 0;
+        if (quitting || (r && linger-- == 0)) break;
+        next.QuadPart += period;
+        QueryPerformanceCounter(&now);
+        if (now.QuadPart > next.QuadPart + period * 4) next = now;
+        while (now.QuadPart < next.QuadPart) {
+            LONGLONG ms = (next.QuadPart - now.QuadPart) * 1000 / freq.QuadPart;
+            if (ms > 1) Sleep((DWORD)(ms - 1));
+            QueryPerformanceCounter(&now);
+        }
+    }
+    picker_close();
+    memcpy(scr_top, keep_top, sizeof keep_top);
+    memcpy(scr_bot, keep_bot, sizeof keep_bot);
+    present();
+    swallow_keys = 1;
+    QueryPerformanceCounter(&next_frame);
+    return quitting ? -1 : r;
+}
+
+/* The picture kept with a save: the field's 3D view as the game saved, without its text boxes (they're 2D), or the
+ * top screen as shown when the 3D engine isn't on it */
+static void save_picture(const char *name) {
+    static uint32_t px[GPU3D_W * 192];
+    const uint32_t *fb = gpu3d_framebuffer();
+    if ((io16(0x304) & 0x8000) && (io32(0) & 8) && fb) {
+        for (int i = 0; i < GPU3D_W * 192; i++) {
+            uint32_t c = fb[i], r = c & 31, g = (c >> 5) & 31, b = (c >> 10) & 31;
+            px[i] = (r << 3 | r >> 2) << 16 | (g << 3 | g >> 2) << 8 | (b << 3 | b >> 2);
+        }
+    } else {
+        memcpy(px, scr_top, sizeof px);
+    }
+    char path[MAX_PATH];
+    saves_picture_path(path, name);
+    write_png(path, px, GPU3D_W, 192);
+}
+
+/* The game started writing a save: ask which file it goes to (Esc: the one in use) */
+static void pick_save_file(void) {
+    char name[64];
+    if (run_picker(PICK_SAVE, name) != 1) strcpy(name, saves_current_name());
+    saves_set_current(name);
+    rc_logf("save at frame %llu goes to %s\n", (unsigned long long)rc_frames, name);
+    save_picture(name);
+    arm7_save_pick_done();
+    arm7_save_flush();
 }
 
 static int down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
@@ -330,7 +465,17 @@ static void read_input(void) {
     if (!wnd) touch_down = 0;
     scripted(&k, &script_ext);
     int alt = focus && down(VK_MENU);                /* Alt+Enter toggles fullscreen; it isn't Start */
+    if (swallow_keys) {
+        int any = down('S') || down('A') || down(VK_ESCAPE);
+        for (int i = 0; i < 10; i++) any |= down(map[i]);
+        if (!any) swallow_keys = 0;
+    }
+    if (swallow_keys) focus = 0;
     for (int i = 0; i < 10; i++) if (focus && down(map[i]) && !(alt && map[i] == VK_RETURN)) k &= ~(1u << i);
+    /* Back to the title menu after a restart: Start, briefly, every half second */
+    if (to_menu && rc_title_menu_frame) { to_menu = 0; rc_logf("title menu at frame %llu\n", (unsigned long long)rc_frames); }
+    if (to_menu && rc_frames % 30 < 2) k &= ~0x0008u;
+    if (title_menu_keys(&k)) want_load = 1;
     fe_keys = k;
     /* X, Y and Debug as the ARM7 leaves them at 0x02ffffa8 for the SDK's pad reading (func_0203d980): bits 10, 11
      * and 13, 0 = pressed, ORed into KEYINPUT; bit 15 means the lid is closed and blanks all keys */
@@ -353,7 +498,7 @@ int fe_render_wanted(void) {
 }
 
 void fe_vblank(void) {
-    int shot = shot_every > 0 && rc_frames % (uint64_t)shot_every == 0;
+    int shot = shot_every > 0 && rc_frames % (uint64_t)shot_every == 0 && rc_frames >= shot_from;
     if (wnd || shot) {
         /* POWCNT1 bit 15: engine A on the top screen, otherwise on the lower (touch) screen */
         if (io16(0x304) & 0x8000) render_frame(scr_top, scr_bot);
@@ -378,13 +523,22 @@ void fe_vblank(void) {
     read_input();
     audio_frame();
     if (wav_dump && rc_frames % 60 == 0) fflush(wav_dump);
+    if (arm7_save_pick_pending()) pick_save_file();
+    if (want_load && !wnd) { want_load = 0; char name[64]; run_picker(PICK_LOAD, name); }
     if (!wnd) return;
 
-    if (speed == 1 || rc_frames % (uint64_t)speed == 0) present();     /* sped up: show every speed-th frame */
+    /* sped up: show every speed-th frame; going back to the title menu, every 8th */
+    if (to_menu ? rc_frames % 8 == 0 : speed == 1 || rc_frames % (uint64_t)speed == 0) present();
 
     MSG m;
     while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageA(&m); }
+    if (want_load) {
+        want_load = 0;
+        char name[64];
+        if (run_picker(PICK_LOAD, name) == 1) switch_save(name);
+    }
     if (quitting) {
+        if (arm7_save_pick_pending()) arm7_save_pick_done();     /* closed mid-save: the file in use */
         arm7_save_flush();
         ExitProcess(0);
     }
@@ -394,7 +548,7 @@ void fe_vblank(void) {
     next_frame.QuadPart += period;
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
-    if (down(VK_TAB) && GetForegroundWindow() == wnd) { next_frame = now; return; }
+    if (to_menu || (down(VK_TAB) && GetForegroundWindow() == wnd)) { next_frame = now; return; }
     if (now.QuadPart > next_frame.QuadPart + period * 4) next_frame = now;     /* fell behind: don't catch up */
     while (now.QuadPart < next_frame.QuadPart) {
         LONGLONG ms = (next_frame.QuadPart - now.QuadPart) * 1000 / freq.QuadPart;

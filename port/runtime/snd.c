@@ -723,11 +723,40 @@ static void invalidate(uint32_t lo, uint32_t hi) {
         if (voices[i].active && voices[i].kind == 0 && voices[i].data >= lo && voices[i].data < hi) voices[i].active = 0;
 }
 
+/* The menu sounds, for what the runtime adds to the game's menus. They stay loaded in the game's sound heap (the same
+ * addresses on the title menu and in the field): cursor, decide, cancel, with the volumes the game gives them. A
+ * sound plays only while its bank is there and (once the game has played it) its sequence starts as it did then. */
+static const struct { uint32_t seq, bank; int volume; } menu_sounds[3] = {
+    {0x020d123c, 0x020d0620, -30}, {0x020d44fc, 0x020d2700, -5}, {0x020d9e5c, 0x020d8f80, -21}};
+static uint8_t menu_sound_sig[3][16];
+static int menu_sound_seen[3];
+
+static void note_menu_sound(uint32_t seq) {
+    for (int k = 0; k < 3; k++)
+        if (seq == menu_sounds[k].seq) {
+            for (int i = 0; i < 16; i++) menu_sound_sig[k][i] = rd8(seq + i);
+            menu_sound_seen[k] = 1;
+        }
+}
+
+void snd_menu_sound(int k) {
+    if (k < 0 || k > 2) return;
+    uint32_t seq = menu_sounds[k].seq, bank = menu_sounds[k].bank;
+    if (rd32(bank) != 0x4b4e4253) return;                              /* "SBNK" */
+    if (menu_sound_seen[k]) for (int i = 0; i < 16; i++) if (rd8(seq + i) != menu_sound_sig[k][i]) return;
+    int p = 15;
+    while (p > 0 && (players[p].active || players[p].prepared)) p--;
+    start_seq(p, seq, 0, bank, 1);
+    players[p].prio = 0x72;
+    players[p].volume_db = menu_sounds[k].volume;
+    if (getenv("B2W2_LOG_SND")) rc_logf("menu sound %d on player %d (frame %llu)\n", k, p, (unsigned long long)rc_frames);
+}
+
 void snd_command(uint32_t id, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
     switch (id) {
-    case 0: start_seq((int)a0, a1, a2, a3, 1); break;                  /* START_SEQ */
+    case 0: note_menu_sound(a1 + a2); start_seq((int)a0, a1, a2, a3, 1); break;   /* START_SEQ */
     case 1: if (a0 < 16) stop_player((int)a0, 0); break;              /* STOP_SEQ */
-    case 2: start_seq((int)a0, a1, a2, a3, 0); break;                  /* PREPARE_SEQ */
+    case 2: note_menu_sound(a1 + a2); start_seq((int)a0, a1, a2, a3, 0); break;   /* PREPARE_SEQ */
     case 3: if (a0 < 16 && players[a0].prepared && !players[a0].active) { players[a0].active = 1; check_finished((int)a0); } break;
     case 4: if (a0 < 16) players[a0].paused = (int)a1; break;         /* PAUSE_SEQ */
     case 5:                                                            /* SKIP_SEQ */

@@ -2,21 +2,7 @@
  * line is drawn, so mid-frame changes (HBlank DMA, VCount interrupts) show. Follows GBATEK "DS Video": BG modes 0-5
  * (text, affine, extended), sprites, windows, blending, master brightness, the VRAM display mode, display capture,
  * and engine A's BG0 showing the 3D engine's output. Colours are 15-bit BGR until the final conversion. */
-#include "internal.h"
-
-/* A layer's line, GPU3D_W wide: screen x runs from -GPU3D_OFS to 256 + GPU3D_OFS, the parts outside 0-255 being
- * the widescreen margins */
-typedef struct {
-    uint16_t color[GPU3D_W];
-    uint8_t prio[GPU3D_W];
-    uint8_t flags[GPU3D_W];    /* bit 0 opaque, bit 1 semi-transparent OBJ, bit 2 3D pixel, bit 3 OBJ window */
-    uint8_t alpha[GPU3D_W];    /* 3D / bitmap OBJ alpha, 0-31 */
-} Line;
-#define X0 (-GPU3D_OFS)
-#define X1 (256 + GPU3D_OFS)
-#define AT(x) ((x) + GPU3D_OFS)
-
-enum { OPAQUE = 1, SEMI = 2, IS3D = 4, OBJWIN = 8 };
+#include "render.h"
 
 static int engine;             /* 0 = A, 1 = B */
 static uint32_t eo;            /* I/O offset of the engine's registers */
@@ -39,8 +25,10 @@ static void put(Line *l, int x, uint16_t c, uint8_t prio, uint8_t flags, uint8_t
 
 /* Widescreen margins of a tiled BG. Its map wraps at 256 or 512 pixels, so drawing it on would bring the far side of
  * the screen (half a text box) into the margin. Instead: a line that repeats (grids, checks, plain colour) goes on
- * repeating; anything else carries its edge pixel outward, which leaves the margin empty when the edge is empty. */
-static void extend_margins(Line *l) {
+ * repeating. On the backmost layer, a picture that crosses the edge is mirrored there, so shapes cut by the screen
+ * edge (the title menu's Poke Ball) close up round instead of being smeared sideways. Anything else carries its edge
+ * pixel outward, which leaves the margin empty when the edge is empty. */
+static void extend_margins(Line *l, int mirror_left, int mirror_right) {
     int period = 0;
     for (int p = 8; p <= 128 && !period; p += 8) {
         int ok = 1;
@@ -54,10 +42,29 @@ static void extend_margins(Line *l) {
     for (int x = X0; x < X1; x++) {
         if (x == 0) x = 256;
         int src = x;
+        int edge = AT(x < 0 ? 0 : 255);
         if (period) { while (src < 0) src += period; while (src > 255) src -= period; }
+        else if ((x < 0 ? mirror_left : mirror_right) && (l->flags[edge] & OPAQUE)) src = x < 0 ? -1 - x : 511 - x;
         else src = x < 0 ? 0 : 255;
         int d = AT(x), sidx = AT(src);
         l->color[d] = l->color[sidx]; l->prio[d] = l->prio[sidx]; l->flags[d] = l->flags[sidx]; l->alpha[d] = l->alpha[sidx];
+    }
+}
+
+/* Whether a picture crosses a BG's left or right edge: more than two colours down that column over the last frame.
+ * A plain or striped edge is background, where mirroring would only bring text near the edge out into the margin. */
+static uint16_t edge_seen[2][4][2][3];
+static uint8_t edge_colours[2][4][2], edge_busy[2][4][2];
+
+static void edge_stats(const Line *l, int n, int y) {
+    for (int side = 0; side < 2; side++) {
+        uint8_t *k = &edge_colours[engine][n][side];
+        uint16_t *seen = edge_seen[engine][n][side];
+        if (y == 0) { edge_busy[engine][n][side] = *k > 2; *k = 0; }
+        int i = AT(side ? 255 : 0), j;
+        uint16_t c = l->flags[i] & OPAQUE ? l->color[i] : 0x8000;
+        for (j = 0; j < *k && seen[j] != c; j++);
+        if (j == *k && *k < 3) seen[(*k)++] = c;
     }
 }
 
@@ -73,7 +80,7 @@ static uint16_t bg_color256(int n, uint16_t cnt, uint32_t idx, uint32_t palno) {
     return pal(idx * 2);
 }
 
-static void bg_text(Line *l, int n, int y) {
+static void bg_text(Line *l, int n, int y, int backmost) {
     uint16_t cnt = io16(eo + 8 + 2 * n);
     int hofs = io16(eo + 0x10 + 4 * n) & 0x1ff, vofs = io16(eo + 0x12 + 4 * n) & 0x1ff;
     int w = cnt & 0x4000 ? 512 : 256, h = cnt & 0x8000 ? 512 : 256;
@@ -97,7 +104,8 @@ static void bg_text(Line *l, int n, int y) {
             if (idx) put(l, x, pal(((e >> 12) * 16 + idx) * 2), cnt & 3, 0, 31);
         }
     }
-    extend_margins(l);
+    edge_stats(l, n, y);
+    extend_margins(l, backmost && edge_busy[engine][n][0], backmost && edge_busy[engine][n][1]);
 }
 
 /* Affine and extended BGs: walk the texture with the rotation/scaling parameters */
@@ -359,6 +367,10 @@ static void render_engine_line(int e, int y) {
         uint16_t backdrop = pal(0);
         static Line bg[4], obj;
 
+        int back = -1;                                       /* the backmost 2D BG: highest priority value, then number */
+        for (int n = 0; n < 4; n++)
+            if ((dispcnt & (0x100u << n)) && !(n == 0 && !e && (dispcnt & 8)) &&
+                (back < 0 || (io16(eo + 8 + 2 * n) & 3) >= (io16(eo + 8 + 2 * back) & 3))) back = n;
         for (int n = 0; n < 4; n++) {
             memset(&bg[n].flags, 0, sizeof bg[n].flags);
             if (!(dispcnt & (0x100u << n))) continue;
@@ -366,11 +378,12 @@ static void render_engine_line(int e, int y) {
             int type = 0;                                    /* 0 text, 1 affine, 2 extended */
             if (n == 2) type = mode == 2 || mode == 4 ? 1 : mode == 5 ? 2 : 0;
             if (n == 3) type = mode == 1 || mode == 2 ? 1 : mode >= 3 && mode <= 5 ? 2 : 0;
-            if (type == 0) bg_text(&bg[n], n, y);
+            if (type == 0) bg_text(&bg[n], n, y, n == back);
             else bg_affine(&bg[n], n, y, type == 2);
         }
         memset(&obj.flags, 0, sizeof obj.flags);
         if (dispcnt & 0x1000) objects(&obj, y);
+        if (!e) title_menu_line(y, bg, &obj);                /* the title menu's extra button (titlemenu.c) */
 
         static uint16_t comp[GPU3D_W];
         for (int sx = X0; sx < X1; sx++) {

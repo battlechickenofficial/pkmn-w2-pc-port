@@ -519,6 +519,13 @@ static int module_present(const RcModule *m, uint32_t fn, int loose) {
 static const RcModule *last_overlay;
 const char *rc_last_overlay(void) { return last_overlay ? last_overlay->name : "-"; }
 
+/* The title menu (overlay 162) calls this function once a frame while it is up; the frontend draws its save-file
+ * button then. Frame + 1, 0 = never. */
+uint64_t rc_title_menu_frame;
+static void note_call(const RcModule *m, uint32_t a) {
+    if (a == 0x0219d3a4 && m->overlay == 162) rc_title_menu_frame = rc_frames + 1;
+}
+
 extern volatile uint32_t rc_last_call;
 
 /* debug: a callee must leave sp as it found it; report the ones that don't (unless a thread switch happened) */
@@ -541,7 +548,7 @@ void rc_call(Cpu *c, uint32_t addr) {
     /* Most indirect calls into overlays hit the same one as last time */
     if (last_overlay && a >= last_overlay->start && a < last_overlay->end) {
         RcFn fn = lookup(last_overlay, a);
-        if (fn && module_present(last_overlay, a, 0)) { checked_call(c, fn, a); return; }
+        if (fn && module_present(last_overlay, a, 0)) { note_call(last_overlay, a); checked_call(c, fn, a); return; }
     }
     /* Passes: code copies, resident modules, overlays matching at their start and at the function, then overlays
      * matching at the function only (DS Protect keeps the start of overlay 337 encrypted in RAM) */
@@ -553,6 +560,7 @@ void rc_call(Cpu *c, uint32_t addr) {
         RcFn fn = lookup(m, a);
         if (!fn || !module_present(m, a, pass == 3)) continue;
         if (kind == 2) last_overlay = m;
+        note_call(m, a);
         checked_call(c, fn, a);
         return;
     }

@@ -12,20 +12,35 @@ cd build/w2/port
 b2w2.exe ../../../baserom/baserom_w2.nds
 ```
 Needs Visual Studio 2022 with the C++ workload, Rust, and the dsd config/extract from `tools/dsd/README.md`.
-Writes `b2w2.sav` (save chip), `b2w2.fw` (firmware, once the game writes to it) and `b2w2.log` next to where it runs.
+Keeps save files in `saves/` and writes `b2w2.fw` (firmware, once the game writes to it) and `b2w2.log` next to
+where it runs.
 
 **Controls:** arrows = D-pad, X = A, Z = B, S = X, A = Y, Q = L, W = R, Enter = Start, Backspace = Select,
 mouse on the touch screen = stylus, hold Tab = fast forward (as fast as it goes), F8 = speed 1x / 2x / 4x / 8x
-(shown in the title bar), Esc = leave fullscreen / quit.
+(shown in the title bar), F7 = save files, Esc = leave fullscreen / quit.
 
 **Display:** F11 or Alt+Enter = fullscreen, F10 = layout (stacked / big top screen with the touch screen inset /
 side by side / top screen only), F9 = widescreen on/off. The window can be resized; the picture keeps its aspect ratio.
 **Widescreen** (on by default) draws the top screen 342 pixels wide (16:9) at the same scale. The 3D world and
 rotated/scaled backgrounds carry on into the extra width. Tiled backgrounds repeat into it when the line is a
-repeating pattern (grids, checks, plain colour) and otherwise stretch their edge pixel outward, so a text box never
-wraps into the opposite margin. Windows, blending and fades cover the margins. Sprites stay in the middle 256 pixels
+repeating pattern (grids, checks, plain colour). On the backmost layer, a picture that crosses the screen edge
+(more than two colours down the edge column) is mirrored outward, so the title menu's Poke Ball closes up round.
+Anything else stretches its edge pixel outward, so a text box never wraps into the opposite margin. Windows, blending and fades cover the margins. Sprites stay in the middle 256 pixels
 (games park unused ones just off screen). The game still culls 3D objects it thinks are off screen, so some can pop
 in at the edges.
+
+**Save files:** the save chip is one of the files in `saves/`; `saves/current.txt` names the one in use. The title
+menu gets one more item, second in the list: つづきから はじめる (or レポートを えらぶ when the game already shows its own つづきから). It
+moves, highlights and sounds like the game's own items (the game's cursor, decide and cancel sounds, which stay
+loaded). A on it opens a list of the files, each with a picture, trainer and play time, the selected one larger on
+the touch screen. It's in the game's font and style, and it uses the game's buttons: Up/Down, L/R a page, A to
+choose, B to go back. Choosing a file restarts the game on it and presses through to the title menu, and あたらしい レポート
+starts on an empty chip. F7 opens the same list anywhere (unsaved progress is lost). When the game saves, it pauses
+on "writing to the report" with the same list, asking which file the save goes to (B: the one in use). The whole
+chip is written there, so saving to another or a new file copies the game as it is now. A new game's first write,
+during the introduction, isn't asked about. Each file's picture (`<name>.png`) is the field's 3D view as it was
+saved, without text boxes. To try someone else's save, put their 512 KB `.sav` from White 2 or Black 2 in `saves/`;
+Black/White saves are listed but can't be loaded. An older `b2w2.sav` becomes `Save 1` (shown as レポート 1).
 
 **Running shoes** from the start: hold B to run from the first step. The runtime sets the game's own running-shoes
 flag (system flag 2403), so saves keep it; `B2W2_NO_RUNNING_SHOES=1` leaves the game as shipped.
@@ -35,7 +50,7 @@ flag (system flag 2403), so saves keep it; `B2W2_NO_RUNNING_SHOES=1` leaves the 
 | Variable | Effect |
 |---|---|
 | `B2W2_HEADLESS=1` | no window, runs as fast as it can |
-| `B2W2_SHOT_EVERY=n` | `shot_<frame>.png` of both screens every n frames |
+| `B2W2_SHOT_EVERY=n`, `B2W2_SHOT_FROM=f` | `shot_<frame>.png` of both screens every n frames (from frame f) |
 | `B2W2_INPUT=4300:START,4700:A,6820:T128x150` | hold a button (or touch x,y) for 6 frames from a frame |
 | `B2W2_WATCHDOG=1` (or `2`) | progress every 2 s from a host thread (`2`: also samples guest registers) |
 | `B2W2_REGDUMP=1` | display registers in the log with each screenshot |
@@ -59,7 +74,10 @@ flag (system flag 2403), so saves keep it; `B2W2_NO_RUNNING_SHOES=1` leaves the 
 | `port/runtime/card.c` | Game card bus: ROM reads and chip ID from the ROM file, card-timed DMA. The game's own file system loads files and overlays through it. |
 | `port/runtime/render.c` | Both 2D engines, drawn line by line with the registers of the moment (HBlank DMA and mid-frame changes show): text/affine/extended BGs, sprites, windows, blending, master brightness, VRAM display, display capture, the 3D layer. |
 | `port/runtime/gpu3d.c` | 3D engine: geometry commands and a software rasterizer: all texture formats, lighting with the shininess table, toon/highlight, shadow polygons, translucent sorting, edge marking, fog, anti-aliasing (approximated). |
-| `port/runtime/frontend.c` | Window, input, audio output (waveOut), 60 Hz pacing, screenshots, scripted input. |
+| `port/runtime/frontend.c` | Window, input, audio output (waveOut), 60 Hz pacing, screenshots, scripted input, restarting on another save file. |
+| `port/runtime/saves.c` | Save files in `saves/`: which one is in use, what each holds (trainer card block, picture), and the list that picks one. |
+| `port/runtime/titlemenu.c` | The title menu's extra item: found on its layers (buttons, selection, "New Game" by its words), drawn into the line being composed, moved onto with the game's own keys. |
+| `port/runtime/font.c` | The game's 12x15 menu font, read from the ROM (`a/0/2/3`), for what the runtime draws. |
 | `port/code_copies.txt` | Code the game copies before running it, recompiled at its run address. |
 
 ## How the translation works

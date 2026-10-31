@@ -46,6 +46,10 @@ void rc_timer_write(int n, uint32_t off);
 void arm7_tick(void);
 void arm7_boot(void);
 void arm7_save_flush(void);
+int arm7_save_pick_pending(void);                 /* the game started a save: which file does it go to? */
+void arm7_save_pick_done(void);                   /* saves_current_path() now names it */
+const char *saves_current_path(void);             /* the save chip's file (saves.c) */
+extern uint64_t rc_title_menu_frame;              /* frame + 1 when the title menu last ran (runtime.c) */
 void arm7_vblank(void);
 uint16_t arm7_ipcsync_read(uint16_t stored);
 void arm7_ipcsync_write(uint16_t v);

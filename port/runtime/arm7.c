@@ -238,18 +238,41 @@ static void spi_packet(uint32_t tag, uint32_t data) {
  * for command 0 (init) the address of a shared argument block:
  *   +0 result  +4 type  +8 id  +12 src  +16 dest  +20 len  +24.. chip spec
  * The ARM7 does the work, writes the result (0 = success) and answers on tag 11 with bit 5 set; the ARM9's callback
- * (func_0206eff0) then wakes the waiting thread. The save chip is a file next to the executable. */
+ * (func_0206eff0) then wakes the waiting thread. The save chip is the save file in use (saves.c). */
 #define SAVE_SIZE (512u << 10)
 static uint8_t save[SAVE_SIZE];
 static int save_loaded, save_dirty;
+static int pick_pending;               /* a save started and the frontend hasn't said which file it goes to */
+static uint64_t last_write;            /* frame + 1 */
 static uint32_t card_arg, card_expect_arg;
 
 static void save_load(void) {
     if (save_loaded) return;
     save_loaded = 1;
     memset(save, 0xff, sizeof save);
-    FILE *f = fopen("b2w2.sav", "rb");
+    FILE *f = fopen(saves_current_path(), "rb");
     if (f) { fread(save, 1, sizeof save, f); fclose(f); }
+}
+
+/* The first write after a quiet spell starts a save. Once the title menu has been up (not while booting), the
+ * frontend asks which file it goes to, and nothing is written to disk until it has answered. Except the first time
+ * an empty chip (no trainer's name in its trainer card block) is written: a new game putting down its first data,
+ * during the introduction, goes to the file in use. */
+static void before_write(void) {
+    static int saves_started;
+    save_dirty = 1;
+    if (rc_title_menu_frame && (!last_write || rc_frames > last_write + 600)) {
+        uint16_t name = (uint16_t)(save[0x19404] | save[0x19405] << 8);
+        if (saves_started++ || (name && name != 0xffff)) pick_pending = 1;
+    }
+    last_write = rc_frames + 1;
+}
+
+int arm7_save_pick_pending(void) { return pick_pending; }
+
+void arm7_save_pick_done(void) {
+    pick_pending = 0;
+    save_dirty = 1;                    /* the whole chip goes to the file chosen */
 }
 
 void arm7_save_flush(void) {
@@ -258,8 +281,8 @@ void arm7_save_flush(void) {
         if (fw) { fwrite(firmware, 1, sizeof firmware, fw); fclose(fw); }
         firmware_dirty = 0;
     }
-    if (!save_dirty) return;
-    FILE *f = fopen("b2w2.sav", "wb");
+    if (!save_dirty || pick_pending) return;
+    FILE *f = fopen(saves_current_path(), "wb");
     if (f) { fwrite(save, 1, sizeof save, f); fclose(f); }
     save_dirty = 0;
 }
@@ -273,8 +296,8 @@ static void card_command(uint32_t cmd) {
         for (uint32_t i = 0; i < len; i++) wr8(dst + i, save[(src + i) % SAVE_SIZE]);
         break;
     case 5: case 7: case 8:                             /* write / program backup: RAM[src] -> save[dst] */
+        before_write();
         for (uint32_t i = 0; i < len; i++) save[(dst + i) % SAVE_SIZE] = rd8(src + i);
-        save_dirty = 1;
         break;
     case 9:                                             /* verify */
         for (uint32_t i = 0; i < len; i++)
@@ -282,8 +305,8 @@ static void card_command(uint32_t cmd) {
         break;
     case 10: case 11: case 12: case 15: {               /* erase page / sector / chip / subsector */
         uint32_t n = cmd == 12 ? SAVE_SIZE : len;
+        before_write();
         for (uint32_t i = 0; i < n; i++) save[(dst + i) % SAVE_SIZE] = 0xff;
-        save_dirty = 1;
         break;
     }
     case 13: wr32(a + 24 + 4 * 13, 0); break;           /* read status */

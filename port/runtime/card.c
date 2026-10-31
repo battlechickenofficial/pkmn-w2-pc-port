@@ -29,6 +29,13 @@ void card_open(const char *path) {
 
 uint32_t card_chip_id(void) { return chip_id; }
 
+/* Read the ROM file directly (the runtime's own use: the game's font for the save-file screens) */
+int card_rom_read(uint64_t addr, void *dst, uint32_t len) {
+    if (!rom || addr + len > rom_size) return 0;
+    _fseeki64(rom, (int64_t)addr, SEEK_SET);
+    return fread(dst, 1, len, rom) == len;
+}
+
 static void read_rom(uint64_t addr, uint32_t len) {
     /* Retail cards redirect reads of the secure area (below 0x8000) */
     if (addr < 0x8000) addr = 0x8000 + (addr & 0x1ff);
