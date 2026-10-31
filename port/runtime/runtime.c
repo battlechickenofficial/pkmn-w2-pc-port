@@ -8,6 +8,7 @@ uint8_t *rc_page[1 << 20];
 Cpu rc_cpu;
 
 static uint8_t main_ram[4 << 20];
+static uint32_t watch_lo, watch_hi;          /* debugging: B2W2_WATCH (below) */
 static uint8_t shared_wram[32 << 10];
 static uint8_t itcm[32 << 10];
 static uint8_t dtcm[16 << 10];
@@ -115,6 +116,8 @@ static void remap(void) {
     rc_remap_vram();
     map(0x00000000, itcm_size, itcm, sizeof itcm);
     map(rc_dtcm_base, rc_dtcm_base + sizeof dtcm, dtcm, sizeof dtcm);
+    if (watch_hi)                                       /* debugging: B2W2_WATCH */
+        for (uint32_t m = 0x02000000; m < 0x03000000; m += 0x400000) map(m + watch_lo, m + watch_hi, NULL, 0);
 }
 
 uint8_t *rc_vram_bank(int b) { return bank_ptr[b]; }
@@ -290,8 +293,100 @@ static uint32_t io_read(uint32_t off, uint32_t v) {
     return v;
 }
 
+/* ------------------------------------------------------------------ debugging: watched main RAM */
+
+/* B2W2_WATCH=lo-hi,a1-a2,b1-b2 (main RAM offsets in hex, frames in decimal) takes the pages of main RAM lo-hi off the
+ * fast path, then logs every byte read between frames b1 and b2 that was never read between a1 and a2, to find what
+ * one action reads that another doesn't. B2W2_DUMP_RAM=frame writes main RAM to ram_<frame>.bin. */
+static unsigned long long watch_a1, watch_a2, watch_b1, watch_b2;
+static uint8_t watch_seen[4 << 20];
+static uint32_t watch_lr[4 << 20];
+
+static int watched(uint32_t a) {
+    if (!watch_hi || a < 0x02000000 || a >= 0x03000000) return 0;
+    uint32_t m = (a - 0x02000000) & 0x3fffff;
+    return m >= (watch_lo & ~0xfffu) && m < ((watch_hi + 0xfff) & ~0xfffu);
+}
+static uint8_t *watch_read(uint32_t a, int n) {
+    uint32_t m = (a - 0x02000000) & 0x3fffff;
+    /* Inside the game's event flag test (func_02019194: flag in r4, lr set by its call to the byte lookup): log each
+     * flag tested in the second window once, with where it lives and whether it is set */
+    static uint8_t flag_seen[0x4000];
+    if (n == 1 && rc_cpu.r[14] == 0x0201919du && rc_cpu.r[4] < 0x4000 && rc_frames >= watch_a1 && rc_frames < watch_a2)
+        flag_seen[rc_cpu.r[4]] |= 1;
+    if (n == 1 && rc_cpu.r[14] == 0x0201919du && rc_frames >= watch_b1 && rc_frames < watch_b2) {
+        uint32_t flag = rc_cpu.r[4];
+        if (flag < 0x4000 && !(flag_seen[flag] & 3) && (flag_seen[flag] |= 2))
+            rc_logf("flag %4u (0x%04x) at %08x bit %u = %d (frame %llu)\n", flag, flag, a, flag & 7,
+                    (main_ram[m] >> (flag & 7)) & 1, (unsigned long long)rc_frames);
+    }
+    for (int i = 0; i < n; i++) {
+        uint32_t b = m + (uint32_t)i;
+        if (rc_frames >= watch_a1 && rc_frames < watch_a2) watch_seen[b] |= 1;
+        if (rc_frames >= watch_b1 && rc_frames < watch_b2 && !(watch_seen[b] & 2)) { watch_seen[b] |= 2; watch_lr[b] = rc_cpu.r[14]; }
+    }
+    return main_ram + m;
+}
+
+/* ------------------------------------------------------------------ game tweaks */
+
+/* Running shoes from the start: system flag 2403 (the field reads it before letting B run) is set every frame. The
+ * event flags hang off the game data, whose pointer is a global: [0x02140af4] + 0x25c = event work, whose flag bits
+ * start at +0x35e (func_02019234's offset). New games clear the flags; the next frame sets this one again, and it is
+ * saved like any other flag. B2W2_NO_RUNNING_SHOES=1 leaves the game alone. */
+#define RUNNING_SHOES_FLAG 2403
+static int in_main_ram(uint32_t a) { return a >= 0x02000000 && a < 0x02400000; }
+static void give_running_shoes(void) {
+    static int off = -1;
+    if (off < 0) off = getenv("B2W2_NO_RUNNING_SHOES") != NULL;
+    if (off) return;
+    uint32_t game = rd32(0x02140af4), ev = in_main_ram(game) ? rd32(game + 0x25c) : 0;
+    if (!in_main_ram(ev)) return;
+    uint32_t a = ev + 0x35e + RUNNING_SHOES_FLAG / 8;
+    uint8_t bit = (uint8_t)(1 << (RUNNING_SHOES_FLAG & 7));
+    if (!(rd8(a) & bit)) wr8(a, rd8(a) | bit);
+}
+
+/* Once a frame, after VBlank starts */
+void rc_debug_frame(void) {
+    give_running_shoes();
+    static int init;
+    static uint32_t lo, hi;
+    if (!init) {
+        init = 1;
+        const char *w = getenv("B2W2_WATCH");
+        if (!w || sscanf(w, "%x-%x,%llu-%llu,%llu-%llu", &lo, &hi, &watch_a1, &watch_a2, &watch_b1, &watch_b2) != 6) hi = 0;
+    }
+    if (hi && !watch_hi && rc_frames + 1 >= watch_a1) { watch_lo = lo; watch_hi = hi; remap(); }   /* slow from here */
+    const char *pk = getenv("B2W2_POKE");             /* B2W2_POKE=frame:addr=byte,... (hex address and byte) */
+    while (pk && *pk) {
+        unsigned long long f = strtoull(pk, (char **)&pk, 10);
+        unsigned addr = 0, val = 0;
+        if (*pk == ':' && sscanf(pk + 1, "%x=%x", &addr, &val) == 2 && rc_frames == f) wr8(addr, (uint8_t)val);
+        pk = strchr(pk, ',');
+        if (pk) pk++;
+    }
+    const char *d = getenv("B2W2_DUMP_RAM");
+    if (d && rc_frames == strtoull(d, NULL, 10)) {
+        char name[64];
+        sprintf(name, "ram_%llu.bin", (unsigned long long)rc_frames);
+        FILE *f = fopen(name, "wb");
+        if (f) { fwrite(main_ram, 1, sizeof main_ram, f); fclose(f); }
+    }
+    if (watch_hi && rc_frames == watch_b2) {
+        int n = 0;
+        for (uint32_t m = watch_lo; m < watch_hi && n < 400; m++)
+            if ((watch_seen[m] & 3) == 2) {
+                rc_logf("watch: %08x = %02x (lr %08x)\n", 0x02000000 + m, main_ram[m], watch_lr[m]);
+                n++;
+            }
+        rc_logf("watch: %d addresses read only in the second window\n", n);
+    }
+}
+
 uint32_t rc_io_rd32(uint32_t a) {
     uint32_t v;
+    if (watched(a)) { memcpy(&v, watch_read(a & ~3u, 4), 4); return v; }
     if (a >= 0x04000000 && a < 0x04010000) v = io_read(a & 0xffff, io32(a & 0xffff));
     else if (a == 0x04100000) v = arm7_fifo_read();
     else if (a == 0x04100010) v = card_data_read();
@@ -302,6 +397,7 @@ uint32_t rc_io_rd32(uint32_t a) {
 }
 uint16_t rc_io_rd16(uint32_t a) {
     uint16_t v;
+    if (watched(a)) { memcpy(&v, watch_read(a & ~1u, 2), 2); return v; }
     if (a >= 0x04000000 && a < 0x04010000) {
         uint32_t off = a & 0xffff;
         v = (uint16_t)(io_read(off & ~3u, io32(off & ~3u)) >> ((off & 2) * 8));
@@ -320,6 +416,7 @@ uint16_t rc_io_rd16(uint32_t a) {
     return v;
 }
 uint8_t rc_io_rd8(uint32_t a) {
+    if (watched(a)) return *watch_read(a, 1);
     return (uint8_t)(rc_io_rd16(a & ~1u) >> ((a & 1) * 8));
 }
 
@@ -363,6 +460,7 @@ static int io_special_write(uint32_t off, uint32_t v, uint32_t len) {
 }
 
 void rc_io_wr32(uint32_t a, uint32_t v) {
+    if (watched(a)) { memcpy(main_ram + ((a - 0x02000000) & 0x3ffffc), &v, 4); return; }
     note_io(a, 1, v);
     if (a < 0x04000000 || a >= 0x04010000) return;
     uint32_t off = a & 0xffff;
@@ -371,6 +469,7 @@ void rc_io_wr32(uint32_t a, uint32_t v) {
     io_written(off, 4);
 }
 void rc_io_wr16(uint32_t a, uint16_t v) {
+    if (watched(a)) { memcpy(main_ram + ((a - 0x02000000) & 0x3ffffe), &v, 2); return; }
     note_io(a, 1, v);
     if (a < 0x04000000 || a >= 0x04010000) return;
     uint32_t off = a & 0xffff;
@@ -379,6 +478,7 @@ void rc_io_wr16(uint32_t a, uint16_t v) {
     io_written(off, 2);
 }
 void rc_io_wr8(uint32_t a, uint8_t v) {
+    if (watched(a)) { main_ram[(a - 0x02000000) & 0x3fffff] = v; return; }
     note_io(a, 1, v);
     if (a < 0x04000000 || a >= 0x04010000) return;
     uint32_t off = a & 0xffff;

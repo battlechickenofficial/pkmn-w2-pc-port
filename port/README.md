@@ -20,9 +20,15 @@ mouse on the touch screen = stylus, hold Tab = fast forward (as fast as it goes)
 
 **Display:** F11 or Alt+Enter = fullscreen, F10 = layout (stacked / big top screen with the touch screen inset /
 side by side / top screen only), F9 = widescreen on/off. The window can be resized; the picture keeps its aspect ratio.
-**Widescreen** (on by default) draws the 3D world 342 pixels wide (16:9) at the same scale, so more of the world
-shows at the sides; 2D (menus, text boxes) stays in the middle 256 pixels. The game still culls objects it thinks
-are off screen, so some can pop in at the edges.
+**Widescreen** (on by default) draws the top screen 342 pixels wide (16:9) at the same scale. The 3D world and
+rotated/scaled backgrounds carry on into the extra width. Tiled backgrounds repeat into it when the line is a
+repeating pattern (grids, checks, plain colour) and otherwise stretch their edge pixel outward, so a text box never
+wraps into the opposite margin. Windows, blending and fades cover the margins. Sprites stay in the middle 256 pixels
+(games park unused ones just off screen). The game still culls 3D objects it thinks are off screen, so some can pop
+in at the edges.
+
+**Running shoes** from the start: hold B to run from the first step. The runtime sets the game's own running-shoes
+flag (system flag 2403), so saves keep it; `B2W2_NO_RUNNING_SHOES=1` leaves the game as shipped.
 
 **Testing switches** (environment variables):
 
@@ -37,6 +43,8 @@ are off screen, so some can pop in at the edges.
 | `B2W2_FULLSCREEN=1` | start in fullscreen |
 | `B2W2_LOG_3D=<frame>`, `B2W2_SND_STATS=<from>-<to>` | that frame's polygons; sequence events per player between two frames |
 | `B2W2_LOG_NOTES=<from>-<to>`, `B2W2_SND_STATE=n` | notes started between two frames; sound players' state every n frames |
+| `B2W2_DUMP_RAM=<frame>`, `B2W2_POKE=<frame>:<addr>=<byte>,...` | write main RAM to `ram_<frame>.bin`; set bytes at a frame |
+| `B2W2_WATCH=<lo>-<hi>,<a1>-<a2>,<b1>-<b2>` | log main RAM bytes (offsets lo-hi, hex) read between frames b1-b2 but not a1-a2, and event flags tested |
 | `B2W2_LOG_PXI=1`, `B2W2_LOG_SND=1`, `B2W2_LOG_THREADS=1`, `B2W2_LOG_KEYS=1`, `B2W2_CHECK_SP=1` | more logging |
 | `RECOMP_CHECK_SP=1` (when building) | generated code checks every call leaves sp alone |
 

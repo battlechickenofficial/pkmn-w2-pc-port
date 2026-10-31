@@ -4,12 +4,17 @@
  * and engine A's BG0 showing the 3D engine's output. Colours are 15-bit BGR until the final conversion. */
 #include "internal.h"
 
+/* A layer's line, GPU3D_W wide: screen x runs from -GPU3D_OFS to 256 + GPU3D_OFS, the parts outside 0-255 being
+ * the widescreen margins */
 typedef struct {
-    uint16_t color[256];
-    uint8_t prio[256];
-    uint8_t flags[256];        /* bit 0 opaque, bit 1 semi-transparent OBJ, bit 2 3D pixel, bit 3 OBJ window */
-    uint8_t alpha[256];        /* 3D / bitmap OBJ alpha, 0-31 */
+    uint16_t color[GPU3D_W];
+    uint8_t prio[GPU3D_W];
+    uint8_t flags[GPU3D_W];    /* bit 0 opaque, bit 1 semi-transparent OBJ, bit 2 3D pixel, bit 3 OBJ window */
+    uint8_t alpha[GPU3D_W];    /* 3D / bitmap OBJ alpha, 0-31 */
 } Line;
+#define X0 (-GPU3D_OFS)
+#define X1 (256 + GPU3D_OFS)
+#define AT(x) ((x) + GPU3D_OFS)
 
 enum { OPAQUE = 1, SEMI = 2, IS3D = 4, OBJWIN = 8 };
 
@@ -28,7 +33,32 @@ static int32_t aff_x[2][2], aff_y[2][2];
 static uint32_t aff_raw[2][2][2];
 
 static void put(Line *l, int x, uint16_t c, uint8_t prio, uint8_t flags, uint8_t alpha) {
-    l->color[x] = c & 0x7fff; l->prio[x] = prio; l->flags[x] = flags | OPAQUE; l->alpha[x] = alpha;
+    int i = AT(x);
+    l->color[i] = c & 0x7fff; l->prio[i] = prio; l->flags[i] = flags | OPAQUE; l->alpha[i] = alpha;
+}
+
+/* Widescreen margins of a tiled BG. Its map wraps at 256 or 512 pixels, so drawing it on would bring the far side of
+ * the screen (half a text box) into the margin. Instead: a line that repeats (grids, checks, plain colour) goes on
+ * repeating; anything else carries its edge pixel outward, which leaves the margin empty when the edge is empty. */
+static void extend_margins(Line *l) {
+    int period = 0;
+    for (int p = 8; p <= 128 && !period; p += 8) {
+        int ok = 1;
+        for (int x = 0; x + p < 256 && ok; x++) {
+            int a = AT(x), b = AT(x + p);
+            if (l->flags[a] != l->flags[b] ||
+                ((l->flags[a] & OPAQUE) && (l->color[a] != l->color[b] || l->prio[a] != l->prio[b]))) ok = 0;
+        }
+        if (ok) period = p;
+    }
+    for (int x = X0; x < X1; x++) {
+        if (x == 0) x = 256;
+        int src = x;
+        if (period) { while (src < 0) src += period; while (src > 255) src -= period; }
+        else src = x < 0 ? 0 : 255;
+        int d = AT(x), sidx = AT(src);
+        l->color[d] = l->color[sidx]; l->prio[d] = l->prio[sidx]; l->flags[d] = l->flags[sidx]; l->alpha[d] = l->alpha[sidx];
+    }
 }
 
 /* ------------------------------------------------------------------ backgrounds */
@@ -67,6 +97,7 @@ static void bg_text(Line *l, int n, int y) {
             if (idx) put(l, x, pal(((e >> 12) * 16 + idx) * 2), cnt & 3, 0, 31);
         }
     }
+    extend_margins(l);
 }
 
 /* Affine and extended BGs: walk the texture with the rotation/scaling parameters */
@@ -90,7 +121,7 @@ static void bg_affine(Line *l, int n, int y, int extended) {
             scr = bg_vram() + ((cnt >> 8) & 31) * 0x4000;
         }
     }
-    for (int x = 0; x < 256; x++) {
+    for (int x = X0; x < X1; x++) {                          /* the transform carries on into the margins */
         int tx = (x0 + pa * x) >> 8, ty = (y0 + pc * x) >> 8;
         if (wrap) { tx &= w - 1; ty &= h - 1; }
         else if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
@@ -128,7 +159,7 @@ static void bg_3d(Line *l, int y) {
     const uint32_t *fb3 = gpu3d_framebuffer();
     int hofs = (int)(io16(eo + 0x10) << 23) >> 23;
     uint8_t prio = io16(eo + 8) & 3;
-    for (int x = 0; x < 256; x++) {
+    for (int x = X0; x < X1; x++) {
         int sx = x + hofs;
         if (sx < -GPU3D_OFS || sx >= 256 + GPU3D_OFS) continue;
         uint32_t p = fb3[y * GPU3D_W + sx + GPU3D_OFS];
@@ -215,9 +246,10 @@ static void objects(Line *l, int y) {
                     color = pal(0x200 + ((a2 >> 12) * 16 + idx) * 2);
                 }
             }
-            if (mode == 2) { l->flags[sx] |= OBJWIN; continue; }
-            if ((l->flags[sx] & OPAQUE) && l->prio[sx] <= prio) continue;
-            uint8_t keep = l->flags[sx] & OBJWIN;
+            /* Sprites stay within the DS's 256 pixels: games park unused ones just off screen */
+            if (mode == 2) { l->flags[AT(sx)] |= OBJWIN; continue; }
+            if ((l->flags[AT(sx)] & OPAQUE) && l->prio[AT(sx)] <= prio) continue;
+            uint8_t keep = l->flags[AT(sx)] & OBJWIN;
             put(l, sx, color, prio, (mode == 1 || mode == 3 ? SEMI : 0) | keep, alpha);
         }
     }
@@ -340,12 +372,14 @@ static void render_engine_line(int e, int y) {
         memset(&obj.flags, 0, sizeof obj.flags);
         if (dispcnt & 0x1000) objects(&obj, y);
 
-        for (int x = 0; x < 256; x++) {
+        static uint16_t comp[GPU3D_W];
+        for (int sx = X0; sx < X1; sx++) {
+            int x = AT(sx), wx = sx < 0 ? 0 : sx > 255 ? 255 : sx;     /* margins take the windows of the edge */
             uint8_t mask = 0x3f;
             if (windows) {
-                if ((windows & 1) && in_window(0, x, y)) mask = winin & 0x3f;
-                else if ((windows & 2) && in_window(1, x, y)) mask = (winin >> 8) & 0x3f;
-                else if ((windows & 4) && (obj.flags[x] & OBJWIN)) mask = (winout >> 8) & 0x3f;
+                if ((windows & 1) && in_window(0, wx, y)) mask = winin & 0x3f;
+                else if ((windows & 2) && in_window(1, wx, y)) mask = (winin >> 8) & 0x3f;
+                else if ((windows & 4) && (obj.flags[AT(wx)] & OBJWIN)) mask = (winout >> 8) & 0x3f;
                 else mask = winout & 0x3f;
             }
             /* The two frontmost layers: lower priority value first, sprites above BGs of the same priority */
@@ -376,7 +410,8 @@ static void render_engine_line(int e, int y) {
                 else if (bmode == 2 && first_ok) c = brighten(c1, evy, 1);
                 else if (bmode == 3 && first_ok) c = brighten(c1, evy, 0);
             }
-            out[x] = c;
+            comp[x] = c;
+            if (sx >= 0 && sx < 256) out[sx] = c;
         }
 
         /* What reaches the screen: the engine's picture, an LCDC bank (VRAM display) or nothing (main memory
@@ -385,29 +420,13 @@ static void render_engine_line(int e, int y) {
         uint16_t mb = io16(eo + 0x6c);
         int mmode = mb >> 14, mf = mb & 31;
         if (mf > 16) mf = 16;
-        for (int x = 0; x < 256; x++) {
-            uint16_t c = (uint16_t)out[x];
-            if (display == 2 && !e) c = bank ? ext16(bank, (uint32_t)(y * 256 + x)) : 0;
+        for (int sx = X0; sx < X1; sx++) {
+            uint16_t c = comp[AT(sx)];
+            if (display == 2 && !e) c = bank && sx >= 0 && sx < 256 ? ext16(bank, (uint32_t)(y * 256 + sx)) : 0;
             else if (display == 3) c = 0;
             if (mmode == 1) c = brighten(c, mf, 1);
             else if (mmode == 2) c = brighten(c, mf, 0);
-            shown[x] = to_argb(c);
-        }
-        /* Widescreen margins: only the 3D world reaches past the DS's 256 pixels (2D is laid out for 256), over
-         * the backdrop; screens without 3D get black bars */
-        int wide3d = !e && display == 1 && (dispcnt & 8) && (dispcnt & 0x100);
-        const uint32_t *fb3 = gpu3d_framebuffer();
-        for (int x = 0; x < GPU3D_W; x++) {
-            if (x == GPU3D_OFS) x += 256;
-            uint16_t c = 0;
-            if (wide3d) {
-                uint32_t p = fb3[y * GPU3D_W + x];
-                int a = (p >> 16) & 31;
-                c = a >= 31 ? (uint16_t)(p & 0x7fff) : a ? blend((uint16_t)p, backdrop, (a + 1) / 2, 16 - (a + 1) / 2) : backdrop;
-                if (mmode == 1) c = brighten(c, mf, 1);
-                else if (mmode == 2) c = brighten(c, mf, 0);
-            }
-            row[x] = to_argb(c);
+            row[AT(sx)] = to_argb(c);
         }
     }
     for (int k = 0; k < 2; k++) {

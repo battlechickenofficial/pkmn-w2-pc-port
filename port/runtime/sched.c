@@ -10,6 +10,8 @@
  * registers and returning from an exception (OS_LoadContext, or the IRQ handler's thread switch at 0x01ff8ce0). After
  * every such return, rc_thread_check looks at the SDK's current-thread pointer and moves to that thread's fiber. */
 #include "internal.h"
+
+void rc_debug_frame(void);
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdlib.h>
@@ -75,6 +77,7 @@ static void scanline(void) {
         rc_dma_event(1);
         gpu3d_swap();
         rc_frames++;
+        rc_debug_frame();
         arm7_vblank();
         fe_vblank();
     }
