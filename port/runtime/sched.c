@@ -237,7 +237,9 @@ void rc_thread_check(Cpu *c, uint32_t target) {
         if (!n->fiber) rc_fatal(c, "CreateFiber failed");
         if (!restarted) rc_logf("thread %08x starts at %08x\n", t, target);
     }
-    if (getenv("B2W2_LOG_THREADS") && (rc_get_user_reg(c, 13) >= 0x02fe3f80u || n->start_pc == target && !restarted))
+    static int log_threads = -1;
+    if (log_threads < 0) log_threads = getenv("B2W2_LOG_THREADS") != NULL;
+    if (log_threads && (rc_get_user_reg(c, 13) >= 0x02fe3f80u || n->start_pc == target && !restarted))
         rc_logf("switch %08x -> %08x at %08x (frame %llu) sp %08x cpsr %08x user sp %08x\n", cur->thread, t, target,
                 (unsigned long long)rc_frames, c->r[13], rc_get_cpsr(c), rc_get_user_reg(c, 13));
     cur = n;

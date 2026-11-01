@@ -29,6 +29,8 @@ struct Module {
     funcs: BTreeMap<u32, (bool, u32)>,
     /// Labels dsd found other code calling into, which get their own entry
     labels: Vec<(u32, bool)>,
+    /// DS Protect's call wrappers (dsprot=0x94 in the symbols): rc_dsprot_call first
+    dsprot_calls: BTreeSet<u32>,
 }
 
 impl Module {
@@ -77,6 +79,9 @@ fn load_symbols(path: &Path, m: &mut Module) {
             let thumb = args.starts_with("thumb");
             let size = args.split(',').find_map(|a| a.strip_prefix("size=")).map(parse_hex).unwrap_or(0);
             m.funcs.insert(addr, (thumb, addr + size));
+            if args.split(',').any(|a| a == "dsprot=0x94") {
+                m.dsprot_calls.insert(addr);
+            }
         } else if let Some(args) = kind.strip_prefix("kind:label(") {
             m.labels.push((addr, args.starts_with("thumb")));
         }
@@ -104,7 +109,7 @@ fn load_module(root: &Path, version: &str, which: &str) -> Module {
     };
     let data = fs::read(&bin).unwrap_or_else(|e| panic!("{}: {e}", bin.display()));
     let mut m = Module { name: which.to_string(), overlay, copy_src: None, base, data, funcs: BTreeMap::new(),
-                         labels: vec![] };
+                         labels: vec![], dsprot_calls: BTreeSet::new() };
     load_symbols(&syms, &mut m);
     m
 }
@@ -142,7 +147,7 @@ fn code_copies(root: &Path, version: &str, loaded: &[Module]) -> Vec<Module> {
         let mut funcs = BTreeMap::new();
         funcs.insert(run, (thumb, run + size));
         out.push(Module { name: format!("copy_{src:08x}"), overlay: None, copy_src: Some(src), base: run,
-                          data: from.data[o..o + size as usize].to_vec(), funcs, labels: vec![] });
+                          data: from.data[o..o + size as usize].to_vec(), funcs, labels: vec![], dsprot_calls: BTreeSet::new() });
     }
     out
 }
@@ -1009,6 +1014,11 @@ impl Emitter<'_> {
         writeln!(self.out, "void {name}(Cpu *c) {{ /* {} */", if thumb { "thumb" } else { "arm" }).unwrap();
         self.out.push_str("    const uint32_t ra = c->r[14];\n    uint32_t t, t2, ea, shc, dummy; uint64_t w;\n");
         self.out.push_str("    (void)ra; (void)t; (void)t2; (void)ea; (void)shc; (void)dummy; (void)w;\n");
+        if self.module().dsprot_calls.contains(&self.f().start) {
+            // DS Protect's wrapper around a call: when it is given a function (r0), on a genuine card it calls it with
+            // the next two arguments; its checks fail here, recompiled, so rc_dsprot_call does just that (runtime.c)
+            self.out.push_str("    if (rc_dsprot_call(c)) return;\n");
+        }
         let insns: Vec<(u32, Decoded)> = self.f().insns.iter().map(|(a, d)| (*a, d.clone())).collect();
         for (addr, d) in insns {
             if self.f().targets.contains(&addr) {
@@ -1058,7 +1068,7 @@ fn dis(args: &[String]) {
     let data = fs::read(&args[0]).unwrap();
     let (base, start, end, thumb) = (parse_hex(&args[1]), parse_hex(&args[2]), parse_hex(&args[3]), args[4] == "thumb");
     let m = Module { name: String::new(), overlay: None, copy_src: None, base, data, funcs: BTreeMap::new(),
-                     labels: vec![] };
+                     labels: vec![], dsprot_calls: BTreeSet::new() };
     let mut a = start;
     while a < end {
         let Some(d) = decode(&m, a, thumb) else { break };

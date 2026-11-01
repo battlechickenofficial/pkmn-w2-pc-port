@@ -89,3 +89,16 @@ uint32_t card_data_read(void) {
     }
     return v;
 }
+
+/* The card's SPI bus (0x040001a0 control, 0x040001a2 data). On the ARM9 only the infrared chip of the Black 2 /
+ * White 2 card is asked anything: before a battle gives experience (overlay 338) it sends command 08h, which a genuine
+ * card's chip answers with its ID, AAh; anything else and no experience is given. Bit 6 of the control holds the
+ * chip selected for the next byte, so a byte written while it was clear ends the transfer. */
+static int spi_busy;
+static uint8_t spi_cmd;
+
+uint8_t card_spi_write(uint16_t cnt, uint8_t v) {
+    if (!spi_busy) spi_cmd = v;
+    spi_busy = (cnt & 0x40) != 0;
+    return spi_cmd == 0x08 ? 0xaa : 0xff;
+}

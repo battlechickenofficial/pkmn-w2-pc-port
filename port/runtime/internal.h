@@ -50,6 +50,10 @@ int arm7_save_pick_pending(void);                 /* the game started a save: wh
 void arm7_save_pick_done(void);                   /* saves_current_path() now names it */
 const char *saves_current_path(void);             /* the save chip's file (saves.c) */
 extern uint64_t rc_title_menu_frame;              /* frame + 1 when the title menu last ran (runtime.c) */
+enum { SCENE_TITLE_MENU, SCENE_BATTLE_COMMAND, SCENE_BATTLE_MOVES, SCENE_BATTLE_BAG, SCENE_BATTLE_PARTY,
+       SCENE_FIELD_MENU, SCENE_BATTLE, SCENE_REPORT, SCENE_COUNT = 16 };
+extern uint64_t rc_scene_frame[SCENE_COUNT];
+int rc_scene(int scene);                          /* that screen is up (it ran in the last two frames) */
 void arm7_vblank(void);
 uint16_t arm7_ipcsync_read(uint16_t stored);
 void arm7_ipcsync_write(uint16_t v);
@@ -65,6 +69,7 @@ void card_open(const char *path);
 uint32_t card_chip_id(void);
 void card_cmd_write(uint32_t off, uint8_t v);
 void card_romctrl_write(uint32_t v);
+uint8_t card_spi_write(uint16_t cnt, uint8_t v);
 uint32_t card_romctrl_read(void);
 int card_data_ready(void);
 uint32_t card_data_read(void);

@@ -54,6 +54,7 @@ void saves_set_current(const char *name) {
 }
 
 void saves_picture_path(char *out, const char *name) { path_of(out, name, ".png"); }
+void saves_panel_path(char *out, const char *name) { path_of(out, name, ".report.png"); }
 
 /* ------------------------------------------------------------------ what a file holds */
 
@@ -67,6 +68,9 @@ typedef struct {
     char when[32];             /* last saved, local time */
     uint32_t *pic;             /* the top screen at that time, or NULL */
     int pw, ph;
+    uint32_t *panel;           /* the game's report panel at that time (date, place, party, badges, Pokedex, play
+                                * time), or NULL */
+    int qw, qh;
 } SaveInfo;
 
 /* "Save 2" before "Save 10" */
@@ -172,6 +176,8 @@ static void read_info(SaveInfo *s) {
     }
     path_of(p, s->name, ".png");
     s->pic = load_png(p, &s->pw, &s->ph);
+    path_of(p, s->name, ".report.png");
+    s->panel = load_png(p, &s->qw, &s->qh);
 }
 
 static int list_saves(SaveInfo *out) {
@@ -206,18 +212,24 @@ static void new_name(char *out) {
 
 /* ------------------------------------------------------------------ the picker */
 
-/* Drawn at the DS's resolution in the title menu's style: striped background, the menu's buttons (grey frame, dark
- * face; cyan frame when selected), the game's font. The top screen lists the files, a picture to the left of each;
- * the touch screen shows the selected one larger with its details and which buttons do what. */
+/* Drawn on the top screen at the DS's resolution, in the title menu's style: striped background, the menu's buttons
+ * (grey frame, dark face; cyan frame when selected), the game's font. The files are listed on the left, a picture
+ * in each; on the right the selected file's report panel from when it was saved (date, place, party, badges,
+ * Pokedex, play time), or on the new file while saving, the game being saved. Under it, the file's picture and
+ * date. */
 
 #define W 342                          /* buffer width; the DS's 256 columns start at OFS */
 #define OFS 43
-#define ROWS 4                         /* list rows on the top screen */
-#define ROW_Y(i) (24 + 41 * (i))
-#define TW 60                          /* list pictures */
-#define TH 34
-#define BW 208                         /* the touch screen's picture */
-#define BH 117
+#define ROWS 4                         /* list rows */
+#define ROW_Y(i) (22 + 38 * (i))
+#define LIST_X0 (-40)
+#define LIST_X1 98
+#define TW 48                          /* list pictures */
+#define TH 27
+#define PANEL_X 102                    /* the report panel */
+#define PANEL_Y 21
+#define PANEL_W 196
+#define PANEL_H 115
 
 static struct {
     int open, mode, n, sel, top, result;
@@ -225,6 +237,16 @@ static struct {
     uint32_t small[MAX_SAVES][TW * TH];
     char chosen[64];
 } pk;
+static uint32_t current_panel[PANEL_W * PANEL_H];
+static int current_qw, current_qh;
+
+/* The report panel of the game in progress, shown on the new file while saving (NULL: none yet) */
+void picker_set_current_panel(const uint32_t *px, int w, int h) {
+    if (!px) { current_qw = current_qh = 0; return; }
+    current_qw = w > PANEL_W ? PANEL_W : w;
+    current_qh = h > PANEL_H ? PANEL_H : h;
+    for (int y = 0; y < current_qh; y++) memcpy(current_panel + y * current_qw, px + y * w, current_qw * 4);
+}
 
 #define RGB24(r, g, b) ((uint32_t)(r) << 16 | (uint32_t)(g) << 8 | (uint32_t)(b))
 static const uint32_t TEXT = RGB24(239, 239, 239), TEXT_SHADOW = RGB24(140, 140, 140);
@@ -256,12 +278,16 @@ void picker_open(int mode) {
         if (!_stricmp(pk.s[i].name, current)) pk.sel = i;
         if (pk.s[i].pic) shrink(pk.s[i].pic, pk.s[i].pw, pk.s[i].ph, pk.small[i], TW, TH);
     }
+    if (pk.sel >= ROWS) pk.top = pk.sel - ROWS + 1;
 }
 
 int picker_active(void) { return pk.open; }
 
 void picker_close(void) {
-    for (int i = 0; i < pk.n; i++) { free(pk.s[i].pic); pk.s[i].pic = NULL; }
+    for (int i = 0; i < pk.n; i++) {
+        free(pk.s[i].pic); pk.s[i].pic = NULL;
+        free(pk.s[i].panel); pk.s[i].panel = NULL;
+    }
     pk.open = 0;
 }
 
@@ -348,81 +374,104 @@ static const wchar_t *game_name(const char *g) {
 
 /* What a file holds, in a line */
 static void summary(const SaveInfo *s, wchar_t *out) {
-    if (s->foreign) swprintf(out, 64, L"このゲームでは つかえません");
-    else if (s->trainer[0]) swprintf(out, 64, L"%ls　%d:%02d", s->trainer, s->hours, s->minutes);
-    else swprintf(out, 64, s->found ? L"まだ レポートが ありません" : L"からっぽ");
+    if (s->foreign) swprintf(out, 64, L"つかえません");
+    else if (s->trainer[0]) swprintf(out, 64, L"%ls", s->trainer);
+    else swprintf(out, 64, s->found ? L"レポートなし" : L"からっぽ");
+}
+
+/* The right column: a report panel, or for a file saved before panels were kept, what the file itself says */
+static void panel(uint32_t *top, const SaveInfo *s) {
+    rect(top, PANEL_X, PANEL_Y, PANEL_X + PANEL_W, PANEL_Y + PANEL_H, RGB24(140, 140, 140));
+    rect(top, PANEL_X + 1, PANEL_Y + 1, PANEL_X + PANEL_W - 1, PANEL_Y + PANEL_H - 1, RGB24(66, 66, 66));
+    const uint32_t *q = NULL;
+    int qw = 0, qh = 0;
+    if (s && s->panel) { q = s->panel; qw = s->qw; qh = s->qh; }
+    else if (!s && pk.mode == PICK_SAVE && current_qw) { q = current_panel; qw = current_qw; qh = current_qh; }
+    if (q) {
+        for (int y = 0; y < qh && y < PANEL_H - 2; y++)
+            for (int x = 0; x < qw && x < PANEL_W - 2; x++) px(top, PANEL_X + 1 + x, PANEL_Y + 1 + y, q[y * qw + x]);
+        return;
+    }
+    wchar_t line[96];
+    int y = PANEL_Y + 8;
+    if (!s) {
+        say(top, pk.mode == PICK_SAVE ? L"あたらしい レポートに" : L"さいしょから", PANEL_X + 8, y, 296, TEXT, TEXT_SHADOW);
+        say(top, pk.mode == PICK_SAVE ? L"かきこみます" : L"はじめます", PANEL_X + 8, y + 18, 296, TEXT, TEXT_SHADOW);
+        return;
+    }
+    if (s->foreign) {
+        say(top, game_name(s->game), PANEL_X + 8, y, 296, TEXT, TEXT_SHADOW);
+        say(top, L"このゲームでは", PANEL_X + 8, y + 18, 296, RGB24(255, 156, 156), TEXT_SHADOW);
+        say(top, L"つかえません", PANEL_X + 8, y + 36, 296, RGB24(255, 156, 156), TEXT_SHADOW);
+        return;
+    }
+    if (!s->trainer[0]) { say(top, s->found ? L"まだ レポートが ありません" : L"からっぽ", PANEL_X + 8, y, 296, TEXT, TEXT_SHADOW); return; }
+    say(top, s->trainer, PANEL_X + 8, y, 296, TEXT, TEXT_SHADOW);
+    say(top, game_name(s->game), PANEL_X + 8, y + 18, 296, TEXT, TEXT_SHADOW);
+    swprintf(line, 96, L"プレイじかん %d:%02d", s->hours, s->minutes);
+    say(top, line, PANEL_X + 8, y + 36, 296, TEXT, TEXT_SHADOW);
 }
 
 void picker_render(uint32_t *top, uint32_t *bottom) {
+    (void)bottom;
     int items = pk.n + 1;
-
-    /* Top screen: a title bar, then the list */
     stripes(top);
-    rect(top, -OFS, 0, 256 + OFS, 19, RGB24(66, 66, 66));
-    rect(top, -OFS, 19, 256 + OFS, 20, RGB24(140, 140, 140));
-    say(top, pk.mode == PICK_SAVE ? L"どの レポートに かきこみますか？" : L"レポートを えらんでください", 8, 2, 248, TEXT,
+
+    /* the title bar, and which buttons do what along the bottom */
+    rect(top, -OFS, 0, 256 + OFS, 18, RGB24(66, 66, 66));
+    rect(top, -OFS, 18, 256 + OFS, 19, RGB24(140, 140, 140));
+    say(top, pk.mode == PICK_SAVE ? L"どの レポートに かきこみますか？" : L"レポートを えらんでください", -36, 2, 290, TEXT,
         TEXT_SHADOW);
+    if (pk.top > 0)
+        for (int k = 0; k < 4; k++) rect(top, 286 - k, 5 + k, 287 + k, 6 + k, TEXT);
+    if (pk.top + ROWS < items)
+        for (int k = 0; k < 4; k++) rect(top, 286 - k, 13 - k, 287 + k, 14 - k, TEXT);
+    rect(top, -OFS, 175, 256 + OFS, 176, RGB24(140, 140, 140));
+    rect(top, -OFS, 176, 256 + OFS, 192, RGB24(66, 66, 66));
+    say(top, pk.mode == PICK_SAVE ? L"Ａ かきこむ　　Ｂ やめる" : L"Ａ あそぶ　　Ｂ もどる", -36, 177, 290, TEXT, TEXT_SHADOW);
+
+    /* the list */
     for (int r = 0; r < ROWS && pk.top + r < items; r++) {
-        int i = pk.top + r, y = ROW_Y(r), sel = i == pk.sel;
+        int i = pk.top + r, y = ROW_Y(r);
         const SaveInfo *s = i < pk.n ? &pk.s[i] : NULL;
-        button(top, 8, y, 248, y + 40, sel);
-        int tx = 12, ty = y + 3;                      /* the picture's place */
-        rect(top, tx - 1, ty - 1, tx + TW + 1, ty + TH + 1, RGB24(33, 33, 33));
-        if (s && s->pic) picture(top, pk.small[i], TW, TH, tx, ty);
-        else if (!s) { rect(top, tx + TW / 2 - 1, ty + 8, tx + TW / 2 + 1, ty + TH - 8, TEXT); rect(top, tx + 18, ty + TH / 2 - 1, tx + TW - 18, ty + TH / 2 + 1, TEXT); }
+        button(top, LIST_X0, y, LIST_X1, y + 36, i == pk.sel);
+        int tx = LIST_X0 + 4, ty = y + 4;
+        rect(top, tx, ty, tx + TW, ty + TH + 1, RGB24(33, 33, 33));
+        if (s && s->pic) picture(top, pk.small[i], TW, TH, tx, ty + 1);
+        else if (!s) { rect(top, tx + TW / 2 - 1, ty + 7, tx + TW / 2 + 1, ty + TH - 5, TEXT); rect(top, tx + 14, ty + TH / 2, tx + TW - 14, ty + TH / 2 + 2, TEXT); }
         wchar_t line[64];
         if (s) display_name(s, line);
-        else swprintf(line, 64, L"あたらしい レポート");
-        int end = say(top, line, 78, y + 3, 244, TEXT, TEXT_SHADOW);
-        if (s && !_stricmp(s->name, current)) say(top, L"しようちゅう", end + 8, y + 3, 244, RGB24(140, 255, 255), RGB24(49, 115, 115));
+        else swprintf(line, 64, L"あたらしく");
+        say(top, line, tx + TW + 4, y + 3, LIST_X1 - 4, TEXT, TEXT_SHADOW);
         if (s) summary(s, line);
-        else swprintf(line, 64, pk.mode == PICK_SAVE ? L"ここに かきこむ" : L"さいしょから はじめる");
-        say(top, line, 78, y + 20, 244, s && s->foreign ? RGB24(255, 156, 156) : TEXT, TEXT_SHADOW);
+        else swprintf(line, 64, pk.mode == PICK_SAVE ? L"かきこむ" : L"はじめる");
+        uint32_t c = s && !_stricmp(s->name, current) ? RGB24(140, 255, 255) : s && s->foreign ? RGB24(255, 156, 156) : TEXT;
+        say(top, line, tx + TW + 4, y + 19, LIST_X1 - 4, c, TEXT_SHADOW);
     }
-    /* more above / below: small triangles at the right of the title bar */
-    if (pk.top > 0)
-        for (int k = 0; k < 4; k++) rect(top, 238 - k, 5 + k, 239 + k, 6 + k, TEXT);
-    if (pk.top + ROWS < items)
-        for (int k = 0; k < 4; k++) rect(top, 238 - k, 14 - k, 239 + k, 15 - k, TEXT);
 
-    /* Touch screen: the selected file larger, its details, the buttons */
-    stripes(bottom);
+    /* the right column */
     const SaveInfo *s = pk.sel < pk.n ? &pk.s[pk.sel] : NULL;
-    int bx = (256 - BW) / 2, by = 5;
-    rect(bottom, bx - 3, by - 3, bx + BW + 3, by + BH + 3, RGB24(140, 140, 140));
-    rect(bottom, bx - 2, by - 2, bx + BW + 2, by + BH + 2, RGB24(255, 255, 255));
-    rect(bottom, bx - 1, by - 1, bx + BW + 1, by + BH + 1, RGB24(140, 140, 140));
-    rect(bottom, bx, by, bx + BW, by + BH, RGB24(66, 66, 66));
+    panel(top, s);
+    int py = PANEL_Y + PANEL_H + 2;
+    rect(top, PANEL_X, py, PANEL_X + 64, py + 37, RGB24(140, 140, 140));
+    rect(top, PANEL_X + 1, py + 1, PANEL_X + 63, py + 36, RGB24(33, 33, 33));
     if (s && s->pic) {
-        static uint32_t big[BW * BH];
-        static int big_of = -1;
-        if (big_of != pk.sel) { shrink(s->pic, s->pw, s->ph, big, BW, BH); big_of = pk.sel; }
-        picture(bottom, big, BW, BH, bx, by);
-    } else {
-        const wchar_t *t = !s ? L"あたらしい レポート" : s->found ? L"がめんの きろくが ありません" : L"からっぽ";
-        say(bottom, t, bx + (BW - font_width(t)) / 2, by + BH / 2 - 7, bx + BW, TEXT, TEXT_SHADOW);
+        static uint32_t mid[62 * 35];
+        static int mid_of = -1, mid_open;
+        if (mid_of != pk.sel || mid_open != pk.open) { shrink(s->pic, s->pw, s->ph, mid, 62, 35); mid_of = pk.sel; mid_open = pk.open; }
+        picture(top, mid, 62, 35, PANEL_X + 1, py + 1);
     }
-    wchar_t line[96];
+    wchar_t line[96], nm[64];
     if (s) {
-        wchar_t nm[64];
         display_name(s, nm);
-        say(bottom, nm, 12, 127, 250, INK, INK_SHADOW);
+        int end = say(top, nm, PANEL_X + 70, py + 2, 298, INK, INK_SHADOW);
+        if (!_stricmp(s->name, current)) say(top, L"しようちゅう", end + 6, py + 2, 298, RGB24(33, 132, 140), INK_SHADOW);
         int y, mo, d, h, mi;
         if (sscanf(s->when, "%d-%d-%d %d:%d", &y, &mo, &d, &h, &mi) == 5) {
             swprintf(line, 96, L"%d/%02d/%02d %d:%02d", y, mo, d, h, mi);
-            say(bottom, line, 244 - font_width(line), 127, 250, INK, INK_SHADOW);
+            say(top, line, PANEL_X + 70, py + 19, 298, INK, INK_SHADOW);
         }
-        if (s->foreign) swprintf(line, 96, L"このゲームでは つかえません");
-        else if (s->trainer[0]) swprintf(line, 96, L"%ls　プレイじかん %d:%02d", s->trainer, s->hours, s->minutes);
-        else summary(s, line);
-        say(bottom, line, 12, 142, 250, s->foreign ? RGB24(206, 66, 66) : INK, INK_SHADOW);
-        say(bottom, game_name(s->game), 12, 157, 250, INK, INK_SHADOW);
     } else {
-        say(bottom, pk.mode == PICK_SAVE ? L"あたらしい ファイルに かきこみます" : L"さいしょから はじめます", 12, 142, 250,
-            INK, INK_SHADOW);
+        say(top, L"あたらしい レポート", PANEL_X + 70, py + 2, 298, INK, INK_SHADOW);
     }
-    rect(bottom, 0, 174, 256, 175, RGB24(140, 140, 140));
-    rect(bottom, 0, 175, 256, 192, RGB24(66, 66, 66));
-    say(bottom, pk.mode == PICK_SAVE ? L"Ａ かきこむ　　Ｂ いまの レポートに かきこむ" : L"Ａ あそぶ　　Ｂ もどる", 8, 176, 250,
-        TEXT, TEXT_SHADOW);
 }

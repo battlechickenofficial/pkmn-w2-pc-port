@@ -3,6 +3,7 @@
  * (text, affine, extended), sprites, windows, blending, master brightness, the VRAM display mode, display capture,
  * and engine A's BG0 showing the 3D engine's output. Colours are 15-bit BGR until the final conversion. */
 #include "render.h"
+#include <stdlib.h>
 
 static int engine;             /* 0 = A, 1 = B */
 static uint32_t eo;            /* I/O offset of the engine's registers */
@@ -338,6 +339,9 @@ static void capture(const uint32_t *graphics) {
 static uint32_t pre[2][256 * 192];       /* engine output before display mode and master brightness */
 static uint32_t fin[2][GPU3D_W * 192];   /* what the screens show, with the widescreen margins */
 
+static void keep_layers(int y, Line *bg, Line *obj);
+static void move_sprites(int y, Line *obj);
+
 static void render_engine_line(int e, int y) {
     engine = e;
     eo = e ? 0x1000 : 0;
@@ -383,7 +387,15 @@ static void render_engine_line(int e, int y) {
         }
         memset(&obj.flags, 0, sizeof obj.flags);
         if (dispcnt & 0x1000) objects(&obj, y);
+        /* Layers left out: the frontend's (render_hide), and for testing B2W2_ONLY_A / B2W2_ONLY_B = the layers to draw
+         * (bits 0-3 BG0-BG3, 4 sprites) */
+        static int only[2] = {-1, -1};
+        if (only[e] < 0) { const char *h = getenv(e ? "B2W2_ONLY_B" : "B2W2_ONLY_A"); only[e] = h ? atoi(h) : 0; }
+        int hide = render_hide[e] | (only[e] ? ~only[e] & 31 : 0);
+        for (int n = 0; n < 5; n++) if (hide >> n & 1) memset(n < 4 ? bg[n].flags : obj.flags, 0, GPU3D_W);
         if (!e) title_menu_line(y, bg, &obj);                /* the title menu's extra button (titlemenu.c) */
+        if (!e) move_sprites(y, &obj);
+        if (e && render_keep_b) keep_layers(y, bg, &obj);
 
         static uint16_t comp[GPU3D_W];
         for (int sx = X0; sx < X1; sx++) {
@@ -446,6 +458,99 @@ static void render_engine_line(int e, int y) {
         uint32_t ar = eo + (k == 0 ? 0x20 : 0x30);
         aff_x[e][k] += (int16_t)io16(ar + 2);
         aff_y[e][k] += (int16_t)io16(ar + 6);
+    }
+}
+
+/* Engine B's layers one by one, for the frontend to place on the top screen (topscreen.c): the DS's 256 columns, 0
+ * where a layer has nothing. Fading to black (master brightness down) becomes fading out: alpha goes down instead. */
+int render_hide[2], render_keep_b, render_ui_mask;
+uint32_t render_layer_b[5][192 * 256], render_ui_b[192 * 256];
+
+static void keep_layers(int y, Line *bg, Line *obj) {
+    uint16_t mb = io16(eo + 0x6c);
+    int mmode = mb >> 14, mf = mb & 31;
+    if (mf > 16) mf = 16;
+    for (int n = 0; n < 5; n++) {
+        const Line *l = n < 4 ? &bg[n] : obj;
+        uint32_t *row = render_layer_b[n] + y * 256;
+        for (int x = 0; x < 256; x++) {
+            int i = AT(x);
+            if (!(l->flags[i] & OPAQUE)) { row[x] = 0; continue; }
+            uint16_t c = l->color[i];
+            uint32_t alpha = mmode == 2 ? 255u * (uint32_t)(16 - mf) / 16 : 255;
+            if (mmode == 1) c = brighten(c, mf, 1);
+            row[x] = alpha ? to_argb(c) | alpha << 24 : 0;
+        }
+    }
+
+    /* And the layers in render_ui_mask composed as the engine composes them (priority, windows, blending), with
+     * nothing where none of them is: where one blends with what isn't there, it gets that much alpha instead */
+    uint32_t *ui = render_ui_b + y * 256;
+    uint16_t bldcnt = io16(eo + 0x50), bldalpha = io16(eo + 0x52);
+    int bmode = (bldcnt >> 6) & 3, eva = bldalpha & 31, evb = (bldalpha >> 8) & 31, evy = io16(eo + 0x54) & 31;
+    if (eva > 16) eva = 16;
+    if (evb > 16) evb = 16;
+    if (evy > 16) evy = 16;
+    int windows = (dispcnt >> 13) & 7;
+    uint16_t winin = io16(eo + 0x48), winout = io16(eo + 0x4a);
+    for (int x = 0; x < 256; x++) {
+        int i = AT(x);
+        uint8_t mask = 0x3f;
+        if (windows) {
+            if ((windows & 1) && in_window(0, x, y)) mask = winin & 0x3f;
+            else if ((windows & 2) && in_window(1, x, y)) mask = (winin >> 8) & 0x3f;
+            else if ((windows & 4) && (obj->flags[i] & OBJWIN)) mask = (winout >> 8) & 0x3f;
+            else mask = winout & 0x3f;
+        }
+        int top = 5, second = 5, top_key = 1000, second_key = 1000;
+        for (int n = 0; n < 5; n++) {
+            const Line *l = n < 4 ? &bg[n] : obj;
+            if (!(render_ui_mask >> n & 1) || !(l->flags[i] & OPAQUE) || !(mask & (1 << n))) continue;
+            int key = l->prio[i] * 8 + (n == 4 ? 0 : 1 + n);
+            if (key < top_key) { second = top; second_key = top_key; top = n; top_key = key; }
+            else if (key < second_key) { second = n; second_key = key; }
+        }
+        if (top == 5) { ui[x] = 0; continue; }
+        const Line *l1 = top < 4 ? &bg[top] : obj, *l2 = second < 4 ? &bg[second] : obj;
+        uint16_t c = l1->color[i];
+        uint32_t alpha = 255;
+        int first_ok = (bldcnt >> top) & 1, second_ok = (bldcnt >> (8 + second)) & 1;
+        if (mask & 0x20) {
+            if (((l1->flags[i] & SEMI) || (bmode == 1 && first_ok)) && second_ok) {
+                if (second == 5) alpha = 255u * (uint32_t)eva / 16;
+                else c = blend(c, l2->color[i], eva, evb);
+            }
+            else if (bmode == 2 && first_ok) c = brighten(c, evy, 1);
+            else if (bmode == 3 && first_ok) c = brighten(c, evy, 0);
+        }
+        if (mmode == 2) alpha = alpha * (uint32_t)(16 - mf) / 16;
+        else if (mmode == 1) c = brighten(c, mf, 1);
+        ui[x] = alpha ? to_argb(c) | alpha << 24 : 0;
+    }
+}
+
+/* Engine A's sprites in a few rectangles drawn dy lines higher or lower (the battle's HP boxes, raised with the view
+ * in the top-screen-only layout): the line is drawn from the sprites of the line it comes from */
+RenderMove render_moves[4];
+
+static void move_sprites(int y, Line *obj) {
+    static Line from;
+    for (int m = 0; m < 4; m++) {
+        const RenderMove *mv = &render_moves[m];
+        if (!mv->dy) continue;
+        int x0 = mv->x0 < X0 ? X0 : mv->x0, x1 = mv->x1 > X1 ? X1 : mv->x1;
+        if (y >= mv->y0 && y < mv->y1)                                         /* where it was */
+            for (int x = x0; x < x1; x++) obj->flags[AT(x)] = 0;
+        int src = y - mv->dy;
+        if (src < mv->y0 || src >= mv->y1 || src < 0 || src >= 192) continue;
+        memset(from.flags, 0, sizeof from.flags);
+        if (dispcnt & 0x1000) objects(&from, src);
+        for (int x = x0; x < x1; x++) {
+            int i = AT(x);
+            if (!(from.flags[i] & OPAQUE)) continue;
+            obj->color[i] = from.color[i]; obj->prio[i] = from.prio[i]; obj->flags[i] = from.flags[i];
+            obj->alpha[i] = from.alpha[i];
+        }
     }
 }
 

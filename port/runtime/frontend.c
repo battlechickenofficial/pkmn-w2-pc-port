@@ -3,7 +3,7 @@
  *
  * Keys: arrows = D-pad, X = A, Z = B, S = X, A = Y, Q = L, W = R, Enter = Start, Backspace = Select,
  *       mouse on the touch screen = stylus, Tab (held) = fast forward, F8 = speed 1x/2x/4x/8x, F11 or Alt+Enter = fullscreen,
- *       F10 = layout (stacked, big top screen, side by side, top screen only), F9 = widescreen on/off, Esc = leave fullscreen / quit,
+ *       F10 = layout (top screen only, the default; stacked, big top screen, side by side), F9 = widescreen on/off, Esc = leave fullscreen / quit,
  *       F7 (or the title menu's extra item, titlemenu.c) = play another save file.
  * B2W2_HEADLESS=1 runs without a window; B2W2_SHOT_EVERY=n saves shot_<frame>.png every n frames. */
 #include "internal.h"
@@ -20,11 +20,17 @@ static int shot_every;
 static uint64_t shot_from;                /* B2W2_SHOT_FROM: no screenshots before this frame */
 static int speed = 1;                    /* F8: 1, 2, 4 or 8 times as fast */
 static int to_menu;                      /* restarted on another save file: press Start, unpaced, until the title menu */
-static int want_load;                    /* the title menu's save-file item or F7: open the picker next frame */
+static int want_load;                    /* the title menu's save-file item or F7 (1), or its Continue (2): the
+                                          * picker next frame */
+static int press_a;                      /* frames left of an A the frontend presses for the player */
+static int auto_continue;                /* restarted to continue a save file: Continue, once at the title menu */
 static int swallow_keys;                 /* after the picker: the game doesn't see keys until they are let go */
 
 void arm7_save_flush(void);
 int title_menu_keys(uint16_t *keys);
+void top_screen_prepare(int on);
+void top_screen_compose(uint32_t *top);
+void top_screen_keys(uint16_t *keys);
 void snd_mix(int16_t *out, int n);
 
 /* ------------------------------------------------------------------ audio */
@@ -153,7 +159,7 @@ static void write_png(const char *path, const uint32_t *px, int w, int h) {
  * Widescreen shows all of the top screen's width (16:9), otherwise its middle 256 pixels (4:3). The touch screen is
  * always 4:3: its 2D picture doesn't extend past 256. Everything keeps its aspect ratio and is centred. */
 static uint32_t scr_top[GPU3D_W * 192], scr_bot[GPU3D_W * 192];
-static int widescreen = 1, layout = 0, fullscreen;
+static int widescreen = 1, layout = 3, fullscreen;
 static RECT top_rect, bot_rect;                  /* where the screens were drawn, in client pixels */
 static WINDOWPLACEMENT saved_place = {sizeof saved_place};
 static LONG saved_style;
@@ -210,8 +216,11 @@ static void present(void) {
     bi.bmiHeader.biBitCount = 32;
     int tx = widescreen ? 0 : GPU3D_OFS, tw = widescreen ? GPU3D_W : 256;
     /* StretchDIBits counts source rows from the bottom of a top-down DIB's last row: pass 192 rows from row 0 */
+    /* Top screen only, while the game has its main engine on the touch screen (the party list from the field menu):
+     * that's where everything is, and the top screen is only decoration, so show the touch screen in its place */
+    const uint32_t *shown_top = layout == 3 && !(io16(0x304) & 0x8000) ? scr_bot : scr_top;
     StretchDIBits(mem, top_rect.left, top_rect.top, top_rect.right - top_rect.left, top_rect.bottom - top_rect.top,
-                  tx, 0, tw, 192, scr_top, &bi, DIB_RGB_COLORS, SRCCOPY);
+                  tx, 0, tw, 192, shown_top, &bi, DIB_RGB_COLORS, SRCCOPY);
     if (bot_rect.right > bot_rect.left)
         StretchDIBits(mem, bot_rect.left, bot_rect.top, bot_rect.right - bot_rect.left, bot_rect.bottom - bot_rect.top,
                       GPU3D_OFS, 0, 256, 192, scr_bot, &bi, DIB_RGB_COLORS, SRCCOPY);
@@ -300,8 +309,11 @@ void fe_init(void) {
     shot_every = e ? atoi(e) : 0;
     if ((e = getenv("B2W2_SHOT_FROM"))) shot_from = strtoull(e, NULL, 10);
     saves_init();
+    if ((e = getenv("B2W2_LAYOUT"))) layout = atoi(e) & 3;      /* 0 stacked, 1 big top, 2 side by side, 3 top only */
     to_menu = getenv("B2W2_TO_MENU") != NULL;
+    auto_continue = getenv("B2W2_CONTINUE") != NULL;
     SetEnvironmentVariableA("B2W2_TO_MENU", NULL);
+    SetEnvironmentVariableA("B2W2_CONTINUE", NULL);
     if (getenv("B2W2_HEADLESS")) { audio_init(); return; }
     SetProcessDPIAware();
     WNDCLASSA wc = {0};
@@ -310,7 +322,7 @@ void fe_init(void) {
     wc.lpszClassName = "b2w2";
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassA(&wc);
-    RECT r = {0, 0, GPU3D_W * 2, 384 * 2};
+    RECT r = {0, 0, GPU3D_W * 3, 192 * 3};          /* the top screen only, three times over */
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
     wnd = CreateWindowA("b2w2", "", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left,
                         r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
@@ -334,7 +346,7 @@ void fe_init(void) {
 
 /* Play another save file: the game reads its save chip as it boots, so start again on the new file, in the same
  * window state, and press through to the title menu */
-static void switch_save(const char *name) {
+static void switch_save(const char *name, int cont) {
     arm7_save_flush();
     saves_set_current(name);
     WINDOWPLACEMENT wp = {sizeof wp};
@@ -346,6 +358,7 @@ static void switch_save(const char *name) {
             SW_SHOWNORMAL, fullscreen, layout, widescreen, speed);
     SetEnvironmentVariableA("B2W2_WINDOW", env);
     SetEnvironmentVariableA("B2W2_TO_MENU", "1");
+    if (cont) SetEnvironmentVariableA("B2W2_CONTINUE", "1");
     STARTUPINFOW si = {sizeof si};
     PROCESS_INFORMATION pi;
     if (CreateProcessW(NULL, GetCommandLineW(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
@@ -369,6 +382,18 @@ static int run_picker(int mode, char name[64]) {
         picker_render(both, both + GPU3D_W * 192);
         write_png("picker.png", both, GPU3D_W, 384);
         picker_close();
+        /* testing: the file to choose; with commas, one after another each time the list comes up */
+        static int picks;
+        const char *pick = getenv("B2W2_PICK");
+        for (int k = 0; pick && k < picks && strchr(pick, ','); k++) pick = strchr(pick, ',') + 1;
+        picks++;
+        if (pick) {
+            size_t n = strcspn(pick, ",");
+            if (n > 63) n = 63;
+            memcpy(name, pick, n);
+            name[n] = 0;
+            return 1;
+        }
         return -1;
     }
     /* at the game's frame rate, mixing sound as it goes: the music carries on, and the menu sounds play */
@@ -423,13 +448,122 @@ static void save_picture(const char *name) {
     write_png(path, px, GPU3D_W, 192);
 }
 
-/* The game started writing a save: ask which file it goes to (Esc: the one in use) */
+/* ------------------------------------------------------------------ the report */
+
+/* The field menu's report (レポート): the game asks whether to write the report over a panel of the game so far
+ * (date, place, party, badges, Pokedex, play time). Here the list of save files comes up instead, with that panel;
+ * choosing a file answers yes for the player (A until the report is written and its screen closes), and the save goes
+ * to that file without asking again. B answers no. The panel is kept with the file (<name>.report.png). */
+enum { REPORT_NONE, REPORT_WAIT, REPORT_YES, REPORT_NO };
+static int report;
+static uint64_t report_from;
+static int report_gone;                  /* frames the report's screen has been away (it is while the save is written) */
+static int report_written;               /* the save was written */
+static char report_file[64];             /* chosen, and the save not yet started */
+#define PANEL_SX 18                      /* the panel on the touch screen, its contents' columns */
+#define PANEL_SY 52
+#define PANEL_SW 192
+#define PANEL_SH 113
+static uint32_t report_panel[PANEL_SW * PANEL_SH];
+static int report_decided;               /* chosen on pressing レポート, before its screen: REPORT_YES or REPORT_NO */
+static int report_open;                  /* レポート was pressed in the field menu: the list at the next frame */
+
+/* The field menu's buttons are 2 x 3; the selected one has a blue face. A on the bottom left one, レポート. */
+extern int render_keep_b;                /* render.h (its OPAQUE would meet windows.h's) */
+extern uint32_t render_ui_b[192 * 256];
+
+static void report_menu_keys(uint16_t k) {
+    static uint16_t last = 0x3ff;
+    uint16_t pressed = last & ~k;
+    last = k;
+    if (!(pressed & 1) || !rc_scene(SCENE_FIELD_MENU) || !render_keep_b) return;
+    int blue = 0;
+    for (int i = 0; i < 4; i++) {
+        uint32_t c = render_ui_b[(130 + i * 6) * 256 + 100 + i * 4];
+        blue += (c & 255) > (c >> 16 & 255) + 40;
+    }
+    if (blue >= 3) report_open = 1;
+}
+
+/* The list as soon as レポート is pressed (the game moves on to the report's screen once it's closed) */
+static void report_early(void) {
+    if (!report_open) return;
+    report_open = 0;
+    picker_set_current_panel(NULL, 0, 0);
+    char name[64];
+    /* the file chosen is the one in use from now: a save that follows another closely (the same writing, to the
+     * game) goes there too */
+    if (run_picker(PICK_SAVE, name) == 1) { strcpy(report_file, name); saves_set_current(name); report_decided = REPORT_YES; }
+    else report_decided = REPORT_NO;
+}
+
+static void save_panel(const char *name) {
+    char path[MAX_PATH];
+    saves_panel_path(path, name);
+    if (report == REPORT_YES) write_png(path, report_panel, PANEL_SW, PANEL_SH);
+    else DeleteFileA(path);                  /* saved some other way: the old panel would be out of date */
+}
+
+static void report_frame(void) {
+    if (!rc_scene(SCENE_REPORT)) {
+        if (report == REPORT_NONE) return;
+        /* away while the save is written (and for a frame or two after): done once away a second after the save */
+        if (report != REPORT_WAIT && ++report_gone < (report_written ? 60 : 300)) return;
+        if (report == REPORT_YES && report_file[0]) {       /* written without a save starting (an empty chip's) */
+            save_picture(report_file);
+            save_panel(report_file);
+        }
+        rc_logf("report done at frame %llu\n", (unsigned long long)rc_frames);
+        report = REPORT_NONE;
+        report_file[0] = 0;
+        report_written = report_gone = 0;
+        return;
+    }
+    report_gone = 0;
+    if (report == REPORT_NONE && report_decided) { report = REPORT_WAIT; report_from = rc_frames; }
+    if (report == REPORT_NONE) { report = REPORT_WAIT; report_from = rc_frames; rc_logf("report up at frame %llu\n", (unsigned long long)rc_frames); }
+    if (report != REPORT_WAIT || rc_frames < report_from + (report_decided ? 12 : 24)) return;   /* the panel is
+                                                                                                  * drawn by then */
+    /* the touch screen is engine B here, the field on engine A above it */
+    const uint32_t *bottom = io16(0x304) & 0x8000 ? scr_bot : scr_top;
+    for (int y = 0; y < PANEL_SH; y++)
+        memcpy(report_panel + y * PANEL_SW, bottom + (PANEL_SY + y) * GPU3D_W + GPU3D_OFS + PANEL_SX, PANEL_SW * 4);
+    picker_set_current_panel(report_panel, PANEL_SW, PANEL_SH);
+    if (report_decided) { report = report_decided; report_decided = 0; return; }
+    char name[64];
+    if (run_picker(PICK_SAVE, name) == 1) {
+        strcpy(report_file, name);
+        saves_set_current(name);
+        report = REPORT_YES;
+    } else {
+        report = REPORT_NO;
+    }
+}
+
+/* The presses that answer the report's question: one every 16 frames, the player's own keys held back meanwhile */
+static void report_keys(uint16_t *k) {
+    if (report == REPORT_NONE) return;
+    *k = 0x03ff;
+    if (!rc_scene(SCENE_REPORT)) return;
+    if (report == REPORT_YES && rc_frames % 16 < 2) *k &= ~0x0001u;        /* A */
+    if (report == REPORT_NO && rc_frames % 16 < 2) *k &= ~0x0002u;         /* B */
+}
+
+/* The game started writing a save: ask which file it goes to (B: the one in use), unless the report's list just did */
 static void pick_save_file(void) {
     char name[64];
-    if (run_picker(PICK_SAVE, name) != 1) strcpy(name, saves_current_name());
+    if (report_file[0]) {
+        strcpy(name, report_file);
+        report_file[0] = 0;
+        report_written = 1;
+        report_gone = 0;                     /* counting from the save */
+    } else if (run_picker(PICK_SAVE, name) != 1) {
+        strcpy(name, saves_current_name());
+    }
     saves_set_current(name);
     rc_logf("save at frame %llu goes to %s\n", (unsigned long long)rc_frames, name);
     save_picture(name);
+    save_panel(name);
     arm7_save_pick_done();
     arm7_save_flush();
 }
@@ -475,7 +609,14 @@ static void read_input(void) {
     /* Back to the title menu after a restart: Start, briefly, every half second */
     if (to_menu && rc_title_menu_frame) { to_menu = 0; rc_logf("title menu at frame %llu\n", (unsigned long long)rc_frames); }
     if (to_menu && rc_frames % 30 < 2) k &= ~0x0008u;
-    if (title_menu_keys(&k)) want_load = 1;
+    int tm = title_menu_keys(&k);
+    if (tm) want_load = tm;
+    /* restarted to continue: Continue (first on the menu, and selected) a moment after the menu is up */
+    if (auto_continue && rc_title_menu_frame && rc_frames > rc_title_menu_frame + 30) { auto_continue = 0; press_a = 2; }
+    if (press_a) { k &= ~0x0001u; press_a--; }                 /* past title_menu_keys: the game sees it */
+    report_menu_keys(k);
+    top_screen_keys(&k);
+    report_keys(&k);
     fe_keys = k;
     /* X, Y and Debug as the ARM7 leaves them at 0x02ffffa8 for the SDK's pad reading (func_0203d980): bits 10, 11
      * and 13, 0 = pressed, ORed into KEYINPUT; bit 15 means the lid is closed and blanks all keys */
@@ -499,11 +640,13 @@ int fe_render_wanted(void) {
 
 void fe_vblank(void) {
     int shot = shot_every > 0 && rc_frames % (uint64_t)shot_every == 0 && rc_frames >= shot_from;
-    if (wnd || shot) {
+    if (wnd || shot || getenv("B2W2_RENDER")) {
         /* POWCNT1 bit 15: engine A on the top screen, otherwise on the lower (touch) screen */
         if (io16(0x304) & 0x8000) render_frame(scr_top, scr_bot);
         else render_frame(scr_bot, scr_top);
+        if (layout == 3) top_screen_compose(scr_top);
     }
+    top_screen_prepare(layout == 3);
     if (shot) {
         static uint32_t both[GPU3D_W * 384];
         memcpy(both, scr_top, sizeof scr_top);
@@ -523,8 +666,19 @@ void fe_vblank(void) {
     read_input();
     audio_frame();
     if (wav_dump && rc_frames % 60 == 0) fflush(wav_dump);
+    report_frame();
     if (arm7_save_pick_pending()) pick_save_file();
-    if (want_load && !wnd) { want_load = 0; char name[64]; run_picker(PICK_LOAD, name); }
+    if (want_load) {
+        /* the game's Continue: the file in use continues there and then; another restarts on it and continues */
+        int cont = want_load == 2;
+        want_load = 0;
+        char name[64];
+        if (run_picker(PICK_LOAD, name) == 1) {
+            if (cont && !_stricmp(name, saves_current_name())) press_a = 2;
+            else if (wnd) switch_save(name, cont);
+        }
+    }
+    report_early();
     if (!wnd) return;
 
     /* sped up: show every speed-th frame; going back to the title menu, every 8th */
@@ -532,11 +686,6 @@ void fe_vblank(void) {
 
     MSG m;
     while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageA(&m); }
-    if (want_load) {
-        want_load = 0;
-        char name[64];
-        if (run_picker(PICK_LOAD, name) == 1) switch_save(name);
-    }
     if (quitting) {
         if (arm7_save_pick_pending()) arm7_save_pick_done();     /* closed mid-save: the file in use */
         arm7_save_flush();

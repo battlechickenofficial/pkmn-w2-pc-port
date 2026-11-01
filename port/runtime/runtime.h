@@ -171,3 +171,4 @@ void rc_check_sp(Cpu *c, uint32_t sp0, uint32_t target);
 /* Generated code calls TICK on every backward branch, so loops reach the runtime now and then */
 #define TICK(addr) do { if (--c->budget < 0) rc_tick(c, addr); } while (0)
 #define RET(v) do { c->ret_to = (v); return; } while (0)
+int rc_dsprot_call(Cpu *c);                        /* DS Protect's call wrappers (runtime.c) */

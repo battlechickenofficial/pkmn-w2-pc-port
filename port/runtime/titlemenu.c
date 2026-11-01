@@ -17,7 +17,7 @@
 #define TOP(k) (16 + 24 * (k))
 #define MAXB 7                          /* buttons that fit with ours: the last ends on line 191 */
 
-enum { K_A = 1, K_B = 2, K_UP = 0x40, K_DOWN = 0x80 };
+enum { K_A = 1, K_B = 2, K_START = 8, K_UP = 0x40, K_DOWN = 0x80 };
 
 typedef struct { uint16_t color[MW]; uint8_t prio[MW], flags[MW], alpha[MW]; } Strip;
 static Strip cur[4][192], prev[4][192]; /* BG0, BG1, BG2, sprites as the game drew them, this frame and the last */
@@ -60,16 +60,19 @@ static void mask_put(void *ctx, int x, int y, int v) {
     if (x >= MX0 && x < MX1 && y >= 0 && y < FONT_H) m->v[y][x - MX0] = (uint8_t)v;
 }
 static const Mask *label_mask(const wchar_t *s) {
-    static struct { const wchar_t *s; Mask m; } cache[8];
-    for (int i = 0; i < 8; i++) {
+    static struct { const wchar_t *s; Mask m; } cache[12];
+    for (int i = 0; i < 12; i++) {
         if (cache[i].s == s) return &cache[i].m;
         if (!cache[i].s) { cache[i].s = s; memset(&cache[i].m, 0, sizeof cache[i].m); font_text(s, 40, 0, mask_put, &cache[i].m); return &cache[i].m; }
     }
     return NULL;
 }
 
+/* The menu's words, in the game's kana and kanji modes; "New Game" is the second and seventh */
 static const wchar_t *const known[] = {L"つづきから　はじめる", L"さいしょから　はじめる", L"ふしぎな　おくりもの",
-                                       L"イッシュリンク", L"マイクテスト"};
+                                       L"イッシュリンク", L"マイクテスト",
+                                       L"続きから　はじめる", L"最初から　はじめる", L"不思議な　贈り物"};
+static int kanji;                       /* the game writes in kanji (its "New Game" was) */
 
 /* Whether button k's words (last frame) are label s; if so, note their colours for that button's style */
 static int words_are(int k, const wchar_t *s) {
@@ -137,7 +140,7 @@ static void understand(void) {
     if (leaving && ((now >= 0 && now != anchor) || !--leaving)) leaving = 0;
     for (int k = 0; k < n; k++)
         for (int i = 0; i < (int)(sizeof known / sizeof *known); i++)
-            if (words_are(k, known[i]) && i == 1) start = k;
+            if (words_are(k, known[i]) && (i == 1 || i == 6)) { start = k; kanji = i == 6; }
     frame_ok = sel >= 0 && start >= 0 && start + 1 < n;
 }
 
@@ -153,7 +156,7 @@ void title_menu_line(int y, Line *bg, Line *obj) {
     if (!font_ready()) return;
     for (int i = 0; i < 4; i++) save_strip(&cur[i][y], layer_of(bg, obj, i));
     if (y == 191) { memcpy(prev, cur, sizeof prev); understand(); }
-    if (!frame_ok) return;
+    if (!frame_ok || start != 0) return;                         /* with a save, the game's own Continue is it */
 
     int slot = start + 1, plain = plain_button();
     int hide_anchor = ours || leaving;                  /* the game's cursor is on anchor, but ours is (or was) selected */
@@ -170,7 +173,7 @@ void title_menu_line(int y, Line *bg, Line *obj) {
         load_strip(&bg[2], &prev[2][TOP(from) + r]);
         for (int x = MX0; x < MX1; x++) { bg[1].flags[AT(x)] = 0; obj->flags[AT(x)] = 0; }
         Put p = {&bg[1], r - 4, (uint8_t)(io16(0x0a) & 3), text_colour[ours]};
-        font_text(start == 0 ? L"つづきから　はじめる" : L"レポートを　えらぶ", 40, 0, line_put, &p);
+        font_text(kanji ? L"続きから　はじめる" : L"つづきから　はじめる", 40, 0, line_put, &p);
         return;
     } else if (y >= 16 && y < TOP(slot)) {
         k = (y - 16) / 24; row = y - TOP(k);
@@ -185,7 +188,8 @@ void title_menu_line(int y, Line *bg, Line *obj) {
 
 /* Called with the keys about to go to the game (KEYINPUT bits, 0 = pressed). Moves onto and off our item, hiding
  * from the game the presses it uses, with the menu's sounds where the game makes none. Returns 1 when A was pressed
- * on it. */
+ * on our item, 2 when on the game's own Continue (つづきから はじめる, first when there is a save): both open the
+ * list of save files instead. */
 int title_menu_keys(uint16_t *keys) {
     static uint16_t last = 0x3ff, hidden;
     static int inject, inject_key;
@@ -193,6 +197,13 @@ int title_menu_keys(uint16_t *keys) {
     last = raw;
     int open = 0;
     if (!frame_ok) { ours = 0; hidden = 0; inject = 0; return 0; }
+    if (start != 0) {                                            /* a save: the game's Continue opens the list */
+        /* A or Start (the game takes either) */
+        if ((pressed & (K_A | K_START)) && sel == 0) { hidden |= pressed & (K_A | K_START); snd_menu_sound(1); open = 2; }
+        hidden &= (uint16_t)~raw;
+        *keys |= hidden;
+        return open;
+    }
     if (!ours) {
         if ((pressed & K_DOWN) && sel == start && !leaving) { ours = 1; anchor = start; hidden |= K_DOWN; snd_menu_sound(0); }
         else if ((pressed & K_UP) && sel == start + 1 && !leaving) { ours = 1; anchor = start + 1; hidden |= K_UP; snd_menu_sound(0); }
@@ -202,8 +213,8 @@ int title_menu_keys(uint16_t *keys) {
         ours = 0; hidden |= key;
         if ((key == K_UP) == (anchor == start + 1)) { inject = 2; inject_key = key; leaving = 30; }
         else snd_menu_sound(0);
-    } else if (pressed & K_A) {
-        hidden |= K_A;
+    } else if (pressed & (K_A | K_START)) {
+        hidden |= pressed & (K_A | K_START);
         snd_menu_sound(1);
         open = 1;
     } else if (pressed & K_B) {
@@ -211,7 +222,7 @@ int title_menu_keys(uint16_t *keys) {
     }
     hidden &= (uint16_t)~raw;            /* until let go */
     *keys |= hidden;
-    if (ours) *keys |= K_UP | K_DOWN | K_A;
+    if (ours) *keys |= K_UP | K_DOWN | K_A | K_START;
     if (inject) { *keys &= (uint16_t)~inject_key; inject--; }
     return open;
 }

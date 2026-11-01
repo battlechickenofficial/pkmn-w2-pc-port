@@ -524,6 +524,18 @@ static uint8_t trans_id[GPU3D_W * 192];      /* ID of the last translucent polyg
 static uint8_t fog_flag[GPU3D_W * 192];
 static uint8_t stencil[GPU3D_W * 192];
 
+/* Narrows [*lo, *hi] to the columns where f0 + d * (x - x0) (a barycentric weight along a row, f0 at column x0)
+ * isn't below 0, with a column to spare each side; 0 when none are. The pixels are still tested one by one, as
+ * before: this only skips the ones that can't pass. */
+static int span(float f0, float d, int x0, int *lo, int *hi) {
+    const float eps = 1e-4f;
+    if (d == 0) return f0 >= -eps;
+    float x = x0 + (-eps - f0) / d;                     /* where it crosses -eps */
+    if (d > 0) { if (x > *hi + 1.0f) return 0; if (x - 1 > *lo) *lo = (int)(x - 1); }
+    else { if (x < *lo - 1.0f) return 0; if (x + 2 < *hi) *hi = (int)(x + 2); }
+    return *lo <= *hi;
+}
+
 static void draw_triangle(const Poly *p, SV *a, SV *b, SV *c) {
     float area = (b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x);
     if (area == 0) return;
@@ -531,8 +543,10 @@ static void draw_triangle(const Poly *p, SV *a, SV *b, SV *c) {
     int front = area < 0;
     if (front && !(p->attr & 0x80)) return;
     if (!front && !(p->attr & 0x40)) return;
-    int x0 = (int)floorf(fminf(a->x, fminf(b->x, c->x))), x1 = (int)ceilf(fmaxf(a->x, fmaxf(b->x, c->x)));
-    int y0 = (int)floorf(fminf(a->y, fminf(b->y, c->y))), y1 = (int)ceilf(fmaxf(a->y, fmaxf(b->y, c->y)));
+#define MIN3(p, q, r) ((p) < (q) ? ((p) < (r) ? (p) : (r)) : ((q) < (r) ? (q) : (r)))
+#define MAX3(p, q, r) ((p) > (q) ? ((p) > (r) ? (p) : (r)) : ((q) > (r) ? (q) : (r)))
+    int x0 = (int)floorf(MIN3(a->x, b->x, c->x)), x1 = (int)ceilf(MAX3(a->x, b->x, c->x));
+    int y0 = (int)floorf(MIN3(a->y, b->y, c->y)), y1 = (int)ceilf(MAX3(a->y, b->y, c->y));
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 > GPU3D_W - 1) x1 = GPU3D_W - 1;
@@ -547,8 +561,18 @@ static void draw_triangle(const Poly *p, SV *a, SV *b, SV *c) {
     int depth_equal = p->attr & 0x4000, write_depth = !p->translucent || (p->attr & 0x800);
     int shadow = mode == 3, fog = (p->attr >> 15) & 1;
     float inv = 1.0f / area;
+    /* each weight's change from one column to the next */
+    float d0 = (b->y - c->y) * inv, d1 = (c->y - a->y) * inv;
     for (int y = y0; y <= y1; y++) {
-        for (int x = x0; x <= x1; x++) {
+        float qx = x0 + 0.5f, qy = y + 0.5f;
+        float f0 = ((b->x - qx) * (c->y - qy) - (b->y - qy) * (c->x - qx)) * inv;
+        float f1 = ((c->x - qx) * (a->y - qy) - (c->y - qy) * (a->x - qx)) * inv;
+        int lo = x0, hi = x1;
+        if (!span(f0, d0, x0, &lo, &hi) || !span(f1, d1, x0, &lo, &hi) || !span(1 - f0 - f1, -d0 - d1, x0, &lo, &hi))
+            continue;
+        if (lo < x0) lo = x0;
+        if (hi > x1) hi = x1;
+        for (int x = lo; x <= hi; x++) {
             float px = x + 0.5f, py = y + 0.5f;
             float w0 = ((b->x - px) * (c->y - py) - (b->y - py) * (c->x - px)) * inv;
             float w1 = ((c->x - px) * (a->y - py) - (c->y - py) * (a->x - px)) * inv;
@@ -558,10 +582,12 @@ static void draw_triangle(const Poly *p, SV *a, SV *b, SV *c) {
             if (iw <= 0) continue;
             float wv = 1 / iw;
             uint32_t z;
-            if (wbuffer) z = (uint32_t)fminf(wv * 4096.0f, 16777215.0f);
+            if (wbuffer) { float zw = wv * 4096.0f; z = (uint32_t)(zw < 16777215.0f ? zw : 16777215.0f); }
             else {
                 float zz = (w0 * a->z + w1 * b->z + w2 * c->z);
-                z = (uint32_t)fminf(fmaxf((zz * 0.5f + 0.5f) * 16777215.0f, 0), 16777215.0f);
+                float zd = (zz * 0.5f + 0.5f) * 16777215.0f;
+                zd = zd > 0 ? zd : 0;                           /* (and 0 for NaN, as fmaxf gave) */
+                z = (uint32_t)(zd < 16777215.0f ? zd : 16777215.0f);
             }
             int i = y * GPU3D_W + x;
             int pass = depth_equal ? !(z > depth[i] + 0x200 || z + 0x200 < depth[i]) : z < depth[i];
@@ -587,7 +613,9 @@ static void draw_triangle(const Poly *p, SV *a, SV *b, SV *c) {
             }
             if (textures) {
                 float s = (w0 * a->s + w1 * b->s + w2 * c->s) * wv, t = (w0 * a->t + w1 * b->t + w2 * c->t) * wv;
-                uint32_t tx = texel(p->texparam, p->palbase, (int)floorf(s), (int)floorf(t));
+                int is = (int)s, it = (int)t;                    /* floor, without the library call */
+                is -= s < is; it -= t < it;
+                uint32_t tx = texel(p->texparam, p->palbase, is, it);
                 int ta = (tx >> 16) & 31;
                 if (!ta) continue;
                 int tr = tx & 31, tg = (tx >> 5) & 31, tb = (tx >> 10) & 31;
@@ -620,6 +648,11 @@ static void draw_triangle(const Poly *p, SV *a, SV *b, SV *c) {
     }
 }
 
+/* The top-screen-only battle view (topscreen.c): the picture scaled about the screen's centre and raised, as if the
+ * camera stood further back, to leave room for the buttons below. Only the near and far planes clip, so what was
+ * drawn past the screen's edges comes into view. */
+float gpu3d_view_scale = 1, gpu3d_view_raise;
+
 static void project(const Poly *p, SV *sv) {
     float vx0 = viewport[0], vy0 = viewport[1], vw = (float)(viewport[2] - viewport[0] + 1),
           vh = (float)(viewport[3] - viewport[1] + 1);
@@ -630,6 +663,10 @@ static void project(const Poly *p, SV *sv) {
         float iw = 1 / w;
         sv[i].x = (v->x * iw + 1) * vw / 2 + vx0 + GPU3D_OFS;     /* widescreen margin on the left */
         sv[i].y = 192 - ((v->y * iw + 1) * vh / 2 + vy0);
+        if (gpu3d_view_scale != 1) {
+            sv[i].x = GPU3D_W / 2.0f + (sv[i].x - GPU3D_W / 2.0f) * gpu3d_view_scale;
+            sv[i].y = 96 + (sv[i].y - 96) * gpu3d_view_scale - gpu3d_view_raise;
+        }
         sv[i].z = v->z * iw;
         sv[i].iw = iw;
         sv[i].r = v->r * iw; sv[i].g = v->g * iw; sv[i].b = v->b * iw;
@@ -747,10 +784,20 @@ static void log_polys(void) {
         for (int k = 0; k < 8; k++) rc_logf(" %06x", texel(polys[0].texparam, polys[0].palbase, 64 + k * 2, 104 + k));
         rc_logf("  slot3 %p\n", (void *)rc_tex_slot(3));
     }
-    for (int i = 0; i < npolys && i < 40; i++) {
+    for (int i = 0; i < npolys && i < 2048; i++) {
         const Poly *p = &polys[i];
         rc_logf("  poly %d: attr %08x tex %08x pal %04x n %d  v0 xyzw %.4f %.4f %.4f %.4f rgb %.0f %.0f %.0f st %.1f %.1f\n", i, p->attr, p->texparam,
                 p->palbase, p->n, p->v[0].x, p->v[0].y, p->v[0].z, p->v[0].w, p->v[0].r, p->v[0].g, p->v[0].b, p->v[0].s, p->v[0].t);
+        SV sv[10];
+        project(p, sv);
+        float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+        for (int k = 0; k < p->n; k++) {
+            if (sv[k].x < x0) x0 = sv[k].x;
+            if (sv[k].x > x1) x1 = sv[k].x;
+            if (sv[k].y < y0) y0 = sv[k].y;
+            if (sv[k].y > y1) y1 = sv[k].y;
+        }
+        rc_logf("      on screen %.0f,%.0f - %.0f,%.0f\n", x0, y0, x1, y1);
     }
 }
 

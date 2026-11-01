@@ -19,8 +19,8 @@ where it runs.
 mouse on the touch screen = stylus, hold Tab = fast forward (as fast as it goes), F8 = speed 1x / 2x / 4x / 8x
 (shown in the title bar), F7 = save files, Esc = leave fullscreen / quit.
 
-**Display:** F11 or Alt+Enter = fullscreen, F10 = layout (stacked / big top screen with the touch screen inset /
-side by side / top screen only), F9 = widescreen on/off. The window can be resized; the picture keeps its aspect ratio.
+**Display:** F11 or Alt+Enter = fullscreen, F10 = layout (top screen only, the default / stacked / big top screen
+with the touch screen inset / side by side), F9 = widescreen on/off. The window can be resized; the picture keeps its aspect ratio.
 **Widescreen** (on by default) draws the top screen 342 pixels wide (16:9) at the same scale. The 3D world and
 rotated/scaled backgrounds carry on into the extra width. Tiled backgrounds repeat into it when the line is a
 repeating pattern (grids, checks, plain colour). On the backmost layer, a picture that crosses the screen edge
@@ -29,18 +29,41 @@ Anything else stretches its edge pixel outward, so a text box never wraps into t
 (games park unused ones just off screen). The game still culls 3D objects it thinks are off screen, so some can pop
 in at the edges.
 
-**Save files:** the save chip is one of the files in `saves/`; `saves/current.txt` names the one in use. The title
-menu gets one more item, second in the list: つづきから はじめる (or レポートを えらぶ when the game already shows its own つづきから). It
-moves, highlights and sounds like the game's own items (the game's cursor, decide and cancel sounds, which stay
-loaded). A on it opens a list of the files, each with a picture, trainer and play time, the selected one larger on
-the touch screen. It's in the game's font and style, and it uses the game's buttons: Up/Down, L/R a page, A to
-choose, B to go back. Choosing a file restarts the game on it and presses through to the title menu, and あたらしい レポート
-starts on an empty chip. F7 opens the same list anywhere (unsaved progress is lost). When the game saves, it pauses
-on "writing to the report" with the same list, asking which file the save goes to (B: the one in use). The whole
-chip is written there, so saving to another or a new file copies the game as it is now. A new game's first write,
-during the introduction, isn't asked about. Each file's picture (`<name>.png`) is the field's 3D view as it was
-saved, without text boxes. To try someone else's save, put their 512 KB `.sav` from White 2 or Black 2 in `saves/`;
-Black/White saves are listed but can't be loaded. An older `b2w2.sav` becomes `Save 1` (shown as レポート 1).
+**Top screen only** (the default layout) brings what the game shows on its touch screen onto the top screen, so
+everything is played with the buttons:
+- Battles: the view stands further back and higher (the 3D picture scaled to 80% and raised, the HP boxes raised
+  with it), leaving the bottom for the buttons.
+- Battle commands: the text box makes way for a row of four buttons, FIGHT, POKÉMON, BAG, RUN, all one symmetric
+  shape after the game's BAG button (a tab with the Japanese word, a black bar with the English one between
+  chevrons, the tab's mirror below), in each button's colours as the game draws them and with its own words. The
+  one the game's cursor is on grows, pushing the others aside, with the cursor around it. Left and Right move along
+  the row and round from RUN to FIGHT; presses are queued, and where the game's own layout needs two presses the
+  second one's cursor sound is hushed.
+- Battle moves: two rows of two plates in the same place, each with the move's type, name and PP; the D-pad moves
+  as in the game.
+- Party balls: under each side's HP box, all at the small size (the one in battle shrunk to match).
+- The battle bag and party (over the battle, dimmed; also the party after a faint, to send the next one out), and the
+  field menu: the whole screen without its background.
+- While the game has its main engine on the touch screen (the party list from the field menu), the touch screen is
+  shown in the top screen's place.
+- The touch screen's status bar (clock, wireless, battery) is left out. Its fades become fades to transparent.
+Screens are known by a function of theirs that the game runs every frame (`runtime.c`, `scene_marks`). Screens not
+handled yet stay on the touch screen: use F10 for a layout that shows it.
+
+**Save files:** the save chip is one of the files in `saves/`; `saves/current.txt` names the one in use. On the title
+menu, the game's own つづきから はじめる opens the list of files to continue from (without a save, an extra item in the
+same place does). The list is on the top screen in the game's font and style: the files on the left with a picture
+each, on the right the selected file's report panel from its last save (date, place, party, badges, Pokédex, play
+time), and under it the file's picture and date. Up/Down, L/R a page, A to choose, B to go back. The file in use
+continues at once; another restarts the game on it and continues; あたらしく はじめる starts on an empty chip. F7
+opens the same list anywhere (unsaved progress is lost). The field menu's レポート opens the list at once, skipping the
+game's question: choosing a file answers yes for you and the save goes there (B answers no). A save started any other
+way pauses on "writing to the report" with the same list. The whole chip is written to the chosen file, so saving to
+another or a new one copies the game as it is now. A new game's first write, during the introduction, isn't asked
+about. Each file keeps `<name>.png` (the field's 3D view as saved, without text boxes) and `<name>.report.png` (the
+report panel). The game's kana and kanji modes are both understood. To try someone else's save, put their 512 KB
+`.sav` from White 2 or Black 2 in `saves/`; Black/White saves are listed but can't be loaded. An older `b2w2.sav`
+becomes `Save 1` (レポート 1).
 
 **Running shoes** from the start: hold B to run from the first step. The runtime sets the game's own running-shoes
 flag (system flag 2403), so saves keep it; `B2W2_NO_RUNNING_SHOES=1` leaves the game as shipped.
@@ -60,6 +83,11 @@ flag (system flag 2403), so saves keep it; `B2W2_NO_RUNNING_SHOES=1` leaves the 
 | `B2W2_LOG_NOTES=<from>-<to>`, `B2W2_SND_STATE=n` | notes started between two frames; sound players' state every n frames |
 | `B2W2_DUMP_RAM=<frame>`, `B2W2_POKE=<frame>:<addr>=<byte>,...` | write main RAM to `ram_<frame>.bin`; set bytes at a frame |
 | `B2W2_WATCH=<lo>-<hi>,<a1>-<a2>,<b1>-<b2>` | log main RAM bytes (offsets lo-hi, hex) read between frames b1-b2 but not a1-a2, and event flags tested |
+| `B2W2_PICK=<name>[,<name>...]` | headless: the save file the list chooses (one after another each time) |
+| `B2W2_LAYOUT=n` | start in layout n (0 stacked, 1 big top, 2 side by side, 3 top only) |
+| `B2W2_CLOCK=<unix time>` | the clock starts there and runs with the frames, so runs repeat exactly |
+| `B2W2_ONLY_A=mask`, `B2W2_ONLY_B=mask` | draw only these layers of an engine (bits 0-3 BG0-BG3, 16 sprites) |
+| `B2W2_LOG_SCENES=1` | log when each known screen comes up |
 | `B2W2_LOG_PXI=1`, `B2W2_LOG_SND=1`, `B2W2_LOG_THREADS=1`, `B2W2_LOG_KEYS=1`, `B2W2_CHECK_SP=1` | more logging |
 | `RECOMP_CHECK_SP=1` (when building) | generated code checks every call leaves sp alone |
 
@@ -77,6 +105,7 @@ flag (system flag 2403), so saves keep it; `B2W2_NO_RUNNING_SHOES=1` leaves the 
 | `port/runtime/frontend.c` | Window, input, audio output (waveOut), 60 Hz pacing, screenshots, scripted input, restarting on another save file. |
 | `port/runtime/saves.c` | Save files in `saves/`: which one is in use, what each holds (trainer card block, picture), and the list that picks one. |
 | `port/runtime/titlemenu.c` | The title menu's extra item: found on its layers (buttons, selection, "New Game" by its words), drawn into the line being composed, moved onto with the game's own keys. |
+| `port/runtime/topscreen.c` | The top-screen-only layout: the touch screen's parts placed on the top screen per screen, the battle command and move rows, party balls, key translation. |
 | `port/runtime/font.c` | The game's 12x15 menu font, read from the ROM (`a/0/2/3`), for what the runtime draws. |
 | `port/code_copies.txt` | Code the game copies before running it, recompiled at its run address. |
 
@@ -87,6 +116,9 @@ flag (system flag 2403), so saves keep it; `B2W2_NO_RUNNING_SHOES=1` leaves the 
 - **Time:** each 256 backward branches advance the clock 1024 bus cycles; Halt/IntrWait jump to the next interrupt.
 - **Interrupts** run the game's handler (DTCM+0x3FFC) on a BIOS-style frame. **Threads:** after every exception return (the SDK's `OS_LoadContext` or its IRQ-exit thread switch) the runtime reads the SDK's current-thread pointer and switches to that thread's fiber, creating it at the thread's start the first time.
 - **Overlays and copied code** apply while guest memory holds the bytes they were compiled from (overlay start and the called function; the function alone for DS Protect's partly encrypted overlay 337).
+- **DS Protect:** its call wrappers (`dsprot=0x94` in the symbols) check the card and hardware, then call the function they're given. The checks can't pass recompiled (they hash and decrypt code that isn't what runs), and failing them ends the game, so when a wrapper is given a function the runtime calls it directly (`rc_dsprot_call`). Without this, closing the party screen after reordering crashed: its cleanup ran twice.
+- **Infrared chip:** before a battle gives experience, overlay 338 asks the card's infrared chip for its ID over the card's SPI bus (command 08h); a genuine card answers AAh, and anything else means no experience. The runtime answers as the chip (`card_spi_write`).
+- **Fatal errors** go to `b2w2.log` too, with the stack's top words and the last overlay called.
 
 ## Status (2026-10-30)
 - 352 modules, 42,810 functions, 1.57 million instructions recompiled; no unsupported instructions.

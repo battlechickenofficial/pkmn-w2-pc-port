@@ -47,7 +47,20 @@ void rc_fatal(Cpu *c, const char *fmt, ...) {
             "  r12 %08x sp %08x lr %08x  cpsr %08x  frame %llu\n", c->r[0], c->r[1], c->r[2], c->r[3], c->r[4],
             c->r[5], c->r[6], c->r[7], c->r[8], c->r[9], c->r[10], c->r[11], c->r[12], c->r[13], c->r[14],
             rc_get_cpsr(c), (unsigned long long)rc_frames);
-    if (rc_log) fflush(rc_log);
+    /* the stack's top words: return addresses there tell who called */
+    const char *rc_last_overlay(void);
+    fprintf(stderr, "  last overlay called: %s\n", rc_last_overlay());
+    fprintf(stderr, "  stack");
+    for (int i = 0; i < 32; i++) fprintf(stderr, "%s%08x", i % 8 ? " " : "\n   ", rd32(c->r[13] + i * 4));
+    fprintf(stderr, "\n");
+    if (rc_log) {
+        va_start(ap, fmt);
+        fprintf(rc_log, "FATAL: ");
+        vfprintf(rc_log, fmt, ap);
+        va_end(ap);
+        fprintf(rc_log, " (frame %llu)\n", (unsigned long long)rc_frames);
+        fflush(rc_log);
+    }
     exit(1);
 }
 
@@ -277,11 +290,13 @@ static uint32_t io_read(uint32_t off, uint32_t v) {
         static uint64_t reads;
         reads++;
         static uint64_t counted;
-        if (getenv("B2W2_LOG_KEYS") && rc_frames % 600 == 0 && counted != rc_frames) {
+        static int log_keys = -1;                         /* (getenv is slow, and the keys are read often) */
+        if (log_keys < 0) log_keys = getenv("B2W2_LOG_KEYS") != NULL;
+        if (log_keys && rc_frames % 600 == 0 && counted != rc_frames) {
             counted = rc_frames;
             rc_logf("key reads so far %llu at frame %llu\n", (unsigned long long)reads, (unsigned long long)rc_frames);
         }
-        if (fe_keys != 0x3ff && logged != rc_frames && getenv("B2W2_LOG_KEYS")) {
+        if (log_keys && fe_keys != 0x3ff && logged != rc_frames) {
             logged = rc_frames;
             rc_logf("keys read %03x at frame %llu (lr %08x)\n", fe_keys, (unsigned long long)rc_frames, rc_cpu.r[14]);
         }
@@ -436,6 +451,8 @@ static void io_written(uint32_t off, uint32_t len) {
     if (off == 0x188) arm7_fifo_write(io32(0x188));
     if (off < 0x1b0 && off + len > 0x1a8) for (int i = 0; i < 8; i++) card_cmd_write(i, rc_io[0x1a8 + i]);
     if (off <= 0x1a4 && off + len > 0x1a7) card_romctrl_write(io32(0x1a4));
+    if (off <= 0x1a2 && off + len > 0x1a2 && (io16(0x1a0) & 0x8000))       /* card SPI: the reply replaces the byte */
+        rc_io[0x1a2] = card_spi_write(io16(0x1a0), rc_io[0x1a2]);
 }
 
 static int io_special_write(uint32_t off, uint32_t v, uint32_t len) {
@@ -519,12 +536,31 @@ static int module_present(const RcModule *m, uint32_t fn, int loose) {
 static const RcModule *last_overlay;
 const char *rc_last_overlay(void) { return last_overlay ? last_overlay->name : "-"; }
 
-/* The title menu (overlay 162) calls this function once a frame while it is up; the frontend draws its save-file
- * button then. Frame + 1, 0 = never. */
+/* Screens the runtime draws differently, known by a function of theirs that the game calls (through a pointer) once a
+ * frame while that screen is up. rc_scene_frame[]: frame + 1 of the last call, 0 = never. */
+static const struct { int overlay; uint32_t addr; int scene; } scene_marks[] = {
+    {162, 0x0219d3a4, SCENE_TITLE_MENU},
+    {167, 0x021b3028, SCENE_BATTLE_COMMAND}, {167, 0x021b3600, SCENE_BATTLE_MOVES},
+    {167, 0x021b3a24, SCENE_BATTLE_BAG}, {167, 0x021b392c, SCENE_BATTLE_PARTY},
+    {167, 0x021b5aec, SCENE_BATTLE_PARTY},                          /* the party after a faint: who goes next */
+    {36, 0x02197e00, SCENE_FIELD_MENU},
+    {167, 0x021b13d4, SCENE_BATTLE}, {87, 0x021e9fc0, SCENE_REPORT},
+};
+uint64_t rc_scene_frame[SCENE_COUNT];
 uint64_t rc_title_menu_frame;
 static void note_call(const RcModule *m, uint32_t a) {
-    if (a == 0x0219d3a4 && m->overlay == 162) rc_title_menu_frame = rc_frames + 1;
+    for (int i = 0; i < (int)(sizeof scene_marks / sizeof *scene_marks); i++)
+        if (a == scene_marks[i].addr && m->overlay == scene_marks[i].overlay) {
+            int sc = scene_marks[i].scene;
+            static int log_scenes = -1;
+            if (log_scenes < 0) log_scenes = getenv("B2W2_LOG_SCENES") != NULL;
+            if (log_scenes && rc_scene_frame[sc] < rc_frames) rc_logf("scene %d frame %llu\n", sc, (unsigned long long)rc_frames);
+            rc_scene_frame[sc] = rc_frames + 1;
+        }
+    rc_title_menu_frame = rc_scene_frame[SCENE_TITLE_MENU];
 }
+
+int rc_scene(int scene) { return rc_scene_frame[scene] && rc_frames <= rc_scene_frame[scene] + 2; }
 
 extern volatile uint32_t rc_last_call;
 
@@ -533,8 +569,9 @@ uint32_t rc_current_thread(void);
 static void checked_call(Cpu *c, RcFn fn, uint32_t a) {
     uint32_t sp0 = c->r[13], mode0 = c->ctl & 0x1f, th0 = rc_current_thread();
     fn(c);
-    static int reports;
-    if (getenv("B2W2_CHECK_SP") && reports < 30 && mode0 == 0x1f && (c->ctl & 0x1f) == mode0 && c->r[13] != sp0 &&
+    static int reports, check = -1;                     /* (looked up once: this is every call through a pointer) */
+    if (check < 0) check = getenv("B2W2_CHECK_SP") != NULL;
+    if (check && reports < 30 && mode0 == 0x1f && (c->ctl & 0x1f) == mode0 && c->r[13] != sp0 &&
         rc_current_thread() == th0) {
         reports++;
         rc_logf("sp changed by call to %08x: %08x -> %08x (lr %08x, frame %llu)\n", a, sp0, c->r[13], c->r[14],
@@ -542,9 +579,25 @@ static void checked_call(Cpu *c, RcFn fn, uint32_t a) {
     }
 }
 
+/* The calls through pointers seen lately, by address: the module and function found for each. A resident module's
+ * is kept only where no code copy could also be (copies come first), and code copies and overlays are checked as
+ * every time before their function runs. */
+static struct { uint32_t a; const RcModule *m; RcFn fn; } call_cache[1024];
+
 void rc_call(Cpu *c, uint32_t addr) {
     uint32_t a = addr & ~1u;
     rc_last_call = a;
+    unsigned slot = (a >> 1) & 1023;
+    if (call_cache[slot].a == a) {
+        const RcModule *m = call_cache[slot].m;
+        if (m->overlay < 0 && !m->copy_src) { note_call(m, a); checked_call(c, call_cache[slot].fn, a); return; }
+        if (module_present(m, a, 0)) {
+            if (!m->copy_src) last_overlay = m;
+            note_call(m, a);
+            checked_call(c, call_cache[slot].fn, a);
+            return;
+        }
+    }
     /* Most indirect calls into overlays hit the same one as last time */
     if (last_overlay && a >= last_overlay->start && a < last_overlay->end) {
         RcFn fn = lookup(last_overlay, a);
@@ -560,6 +613,11 @@ void rc_call(Cpu *c, uint32_t addr) {
         RcFn fn = lookup(m, a);
         if (!fn || !module_present(m, a, pass == 3)) continue;
         if (kind == 2) last_overlay = m;
+        int cache = pass != 3;
+        if (kind == 1)
+            for (int j = 0; j < rc_module_count; j++)
+                if (rc_modules[j].copy_src && a >= rc_modules[j].start && a < rc_modules[j].end) cache = 0;
+        if (cache) { call_cache[slot].a = a; call_cache[slot].m = m; call_cache[slot].fn = fn; }
         note_call(m, a);
         checked_call(c, fn, a);
         return;
@@ -572,6 +630,26 @@ void rc_call(Cpu *c, uint32_t addr) {
                 m->data[1], m->data[(a - m->start) / 4], m->data[(a - m->start) / 4 + 1]);
     }
     rc_fatal(c, "call to %08x: no recompiled function there (lr %08x)", addr, c->r[14]);
+}
+
+/* DS Protect's call wrappers (the recompiler starts each with this). Given a function (r0), on a genuine card one
+ * checks the card and the hardware, then calls it with the next two arguments and returns what it returns. Its checks
+ * can't pass recompiled (they hash and decrypt code the recompiled program doesn't run from), and when they fail it
+ * ends the game, so the call is made directly. Given anything else (the wrappers that run when a check has already
+ * failed), the wrapper runs as it is: 0. */
+int rc_dsprot_call(Cpu *c) {
+    uint32_t fn = c->r[0], a = fn & ~1u, ra = c->r[14];
+    for (int i = 0; i < rc_module_count; i++) {
+        const RcModule *m = &rc_modules[i];
+        if (a < m->start || a >= m->end || !lookup(m, a) || !module_present(m, a, 0)) continue;
+        c->r[0] = c->r[1];
+        c->r[1] = c->r[2];
+        rc_call(c, fn);
+        c->r[14] = ra;
+        c->ret_to = ra;
+        return 1;
+    }
+    return 0;
 }
 
 void rc_bad_jump(Cpu *c, uint32_t at, uint32_t target) { rc_fatal(c, "computed jump at %08x to %08x has no case", at, target); }

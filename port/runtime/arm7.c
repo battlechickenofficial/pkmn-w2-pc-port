@@ -216,7 +216,12 @@ static uint32_t bcd(int v) { return (uint32_t)((v / 10) << 4 | (v % 10)); }
  * 24-26) and 0x02fffdec (hour 0-5, minute 8-14, second 16-22). Reply: command << 8 | result, 0 = success. */
 #include <time.h>
 static void rtc_command(uint32_t data) {
-    time_t now = time(NULL);
+    /* B2W2_CLOCK=<unix time>: the clock starts there and runs with the game's frames, so runs repeat exactly (the
+     * game seeds its random numbers from the clock) */
+    static int fixed = -1;
+    static time_t start;
+    if (fixed < 0) { const char *e = getenv("B2W2_CLOCK"); fixed = e != NULL; if (e) start = (time_t)_atoi64(e); }
+    time_t now = fixed ? start + (time_t)(rc_frames * 560190 / RC_CLOCK) : time(NULL);
     struct tm t;
     localtime_s(&t, &now);
     wr32(0x02fffde8, bcd(t.tm_year % 100) | bcd(t.tm_mon + 1) << 8 | bcd(t.tm_mday) << 16 | (uint32_t)t.tm_wday << 24);
@@ -330,8 +335,9 @@ void arm7_reply_sound_alarm(int no, int id) { arm7_reply(7 | (uint32_t)(no | id 
 static void sound_commands(uint32_t list) {
     for (int guard = 0; list && guard < 4096; guard++) {
         uint32_t next = rd32(list), id = rd32(list + 4), arg0 = rd32(list + 8);
-        static int logged[64];
-        if (getenv("B2W2_LOG_SND") && id < 64 && logged[id]++ < 6)
+        static int logged[64], log_snd = -1;
+        if (log_snd < 0) log_snd = getenv("B2W2_LOG_SND") != NULL;
+        if (log_snd && id < 64 && logged[id]++ < 6)
             rc_logf("snd cmd %2u: %08x %08x %08x %08x (frame %llu)\n", id, arg0, rd32(list + 12), rd32(list + 16),
                     rd32(list + 20), (unsigned long long)rc_frames);
         snd_command(id, arg0, rd32(list + 12), rd32(list + 16), rd32(list + 20));
