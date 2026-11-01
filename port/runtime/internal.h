@@ -51,7 +51,7 @@ void arm7_save_pick_done(void);                   /* saves_current_path() now na
 const char *saves_current_path(void);             /* the save chip's file (saves.c) */
 extern uint64_t rc_title_menu_frame;              /* frame + 1 when the title menu last ran (runtime.c) */
 enum { SCENE_TITLE_MENU, SCENE_BATTLE_COMMAND, SCENE_BATTLE_MOVES, SCENE_BATTLE_BAG, SCENE_BATTLE_PARTY,
-       SCENE_FIELD_MENU, SCENE_BATTLE, SCENE_REPORT, SCENE_COUNT = 16 };
+       SCENE_FIELD_MENU, SCENE_BATTLE, SCENE_REPORT, SCENE_BATTLE_NEXT, SCENE_COUNT = 16 };
 extern uint64_t rc_scene_frame[SCENE_COUNT];
 int rc_scene(int scene);                          /* that screen is up (it ran in the last two frames) */
 void arm7_vblank(void);

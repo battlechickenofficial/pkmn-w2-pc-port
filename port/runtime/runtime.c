@@ -543,6 +543,7 @@ static const struct { int overlay; uint32_t addr; int scene; } scene_marks[] = {
     {167, 0x021b3028, SCENE_BATTLE_COMMAND}, {167, 0x021b3600, SCENE_BATTLE_MOVES},
     {167, 0x021b3a24, SCENE_BATTLE_BAG}, {167, 0x021b392c, SCENE_BATTLE_PARTY},
     {167, 0x021b5aec, SCENE_BATTLE_PARTY},                          /* the party after a faint: who goes next */
+    {167, 0x021b5930, SCENE_BATTLE_NEXT},                           /* before it: use the next one, or run */
     {36, 0x02197e00, SCENE_FIELD_MENU},
     {167, 0x021b13d4, SCENE_BATTLE}, {87, 0x021e9fc0, SCENE_REPORT},
 };

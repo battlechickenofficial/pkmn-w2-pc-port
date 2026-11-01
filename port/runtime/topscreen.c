@@ -69,14 +69,25 @@ static void copy_layers(int mask, int sx, int sy, int w, int h, int dx, int dy) 
         }
 }
 
-/* The touch screen as composed from the layers in render_ui_mask, rows y0 to y1, at the same place on the top screen */
-static void copy_composed(int y0, int y1) {
+/* Whether the touch screen's status bar (clock, IR, Wi-Fi, battery) is along its top, lines 0-15: dark grey with a
+ * blue-grey line 13. It never goes on the top screen; a screen's own things can be where it was once it's gone. */
+static int status_bar_up(void) {
+    for (int x = 8; x < 256; x += 60)
+        if ((render_ui_b[x] & 0xffffff) != 0x181818 || (render_ui_b[13 * 256 + x] & 0xffffff) != 0x4a5263) return 0;
+    return 1;
+}
+
+/* The touch screen as composed from the layers in render_ui_mask, rows y0 to y1, dy lines lower on the top screen
+ * (never its status bar) */
+static void copy_composed_to(int y0, int y1, int dy) {
+    if (y0 < 16 && status_bar_up()) y0 = 16;
     for (int y = y0; y < y1; y++)
         for (int x = 0; x < 256; x++) {
             uint32_t c = render_ui_b[y * 256 + x];
-            if (c) put(x, y, c);
+            if (c) put(x, y + dy, c);
         }
 }
+static void copy_composed(int y0, int y1) { copy_composed_to(y0, y1, 0); }
 
 /* Whether BG3 has the screen's own background yet (the field menu's grid, the bag's and the party's Poke Ball): the
  * game's function for a screen starts while the touch screen still shows the one before */
@@ -408,7 +419,7 @@ void top_screen_prepare(int on) {
     /* the text box: the buttons go there, and the bag and the party go over it */
     int fe_reporting(void);
     render_hide[0] = active && (fe_reporting() || rc_scene(SCENE_BATTLE_COMMAND) || rc_scene(SCENE_BATTLE_MOVES) ||
-                                rc_scene(SCENE_BATTLE_BAG) || rc_scene(SCENE_BATTLE_PARTY) ||
+                                rc_scene(SCENE_BATTLE_BAG) || rc_scene(SCENE_BATTLE_PARTY) || rc_scene(SCENE_BATTLE_NEXT) ||
                                 rc_scene(SCENE_FIELD_MENU) || rc_scene(SCENE_REPORT)) ? L_BG1 : 0;    /* (the field's: a band pointing down) */
 }
 
@@ -426,15 +437,21 @@ void top_screen_compose(uint32_t *top_screen) {
             copy_composed(16, 172);
             copy_layers(L_OBJ, 0, 172, 256, 20, 0, 172);          /* the close button, without the bar it's on */
         }
-    } else if (rc_scene(SCENE_BATTLE_BAG) || rc_scene(SCENE_BATTLE_PARTY)) {
-        if (background_up()) {
-            /* the battle behind dimmed a little, with the fade's alpha, then the screen over it */
+    } else if (rc_scene(SCENE_BATTLE_BAG) || rc_scene(SCENE_BATTLE_PARTY) || rc_scene(SCENE_BATTLE_NEXT)) {
+        /* the battle behind dimmed a little, with the fade's alpha, then the screen over it; after a faint, the
+         * question before the party (use the next one, or run): once its buttons are drawn (the first's grey top edge
+         * on line 36, not the panels opening or its words alone), the buttons and the cursor only (lines 30-127),
+         * centred, without the red tabs above them and the panel below */
+        int next = rc_scene(SCENE_BATTLE_NEXT), buttons = 1;
+        for (int x = 64; x < 256 && next; x += 64) buttons &= (render_ui_b[36 * 256 + x] & 0xffffff) == 0x7b7b7b;
+        if (next ? buttons : background_up()) {
             uint32_t k = 256 - 96 * fade / 255;
             for (int i = 0; i < W * 192; i++) {
                 uint32_t c = top[i];
                 top[i] = ((c >> 16 & 255) * k >> 8) << 16 | ((c >> 8 & 255) * k >> 8) << 8 | (c & 255) * k >> 8;
             }
-            copy_composed(0, 192);
+            if (next) copy_composed_to(30, 128, 96 - 79);
+            else copy_composed(0, 192);
         }
     } else if (rc_scene(SCENE_BATTLE_MOVES)) {
         battle_moves();                                          /* finds the cursor first */
