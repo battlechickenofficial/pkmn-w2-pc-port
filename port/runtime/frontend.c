@@ -24,6 +24,8 @@ static int want_load;                    /* the title menu's save-file item or F
                                           * picker next frame */
 static int press_a;                      /* frames left of an A the frontend presses for the player */
 static int auto_continue;                /* restarted to continue a save file: Continue, once at the title menu */
+static int loading;                      /* a save file chosen to play: black until the game has left the title menu
+                                          * (its Continue flashing and fading), so the list goes straight to the game */
 static int swallow_keys;                 /* after the picker: the game doesn't see keys until they are let go */
 
 void arm7_save_flush(void);
@@ -32,6 +34,7 @@ void top_screen_prepare(int on);
 void top_screen_compose(uint32_t *top);
 void top_screen_keys(uint16_t *keys);
 void snd_mix(int16_t *out, int n);
+void snd_menu_sound(int k);
 
 /* ------------------------------------------------------------------ audio */
 
@@ -219,9 +222,10 @@ static void present(void) {
     /* Top screen only, while the game has its main engine on the touch screen (the party list from the field menu):
      * that's where everything is, and the top screen is only decoration, so show the touch screen in its place */
     const uint32_t *shown_top = layout == 3 && !(io16(0x304) & 0x8000) ? scr_bot : scr_top;
-    StretchDIBits(mem, top_rect.left, top_rect.top, top_rect.right - top_rect.left, top_rect.bottom - top_rect.top,
-                  tx, 0, tw, 192, shown_top, &bi, DIB_RGB_COLORS, SRCCOPY);
-    if (bot_rect.right > bot_rect.left)
+    if (!loading)
+        StretchDIBits(mem, top_rect.left, top_rect.top, top_rect.right - top_rect.left, top_rect.bottom - top_rect.top,
+                      tx, 0, tw, 192, shown_top, &bi, DIB_RGB_COLORS, SRCCOPY);
+    if (!loading && bot_rect.right > bot_rect.left)
         StretchDIBits(mem, bot_rect.left, bot_rect.top, bot_rect.right - bot_rect.left, bot_rect.bottom - bot_rect.top,
                       GPU3D_OFS, 0, 256, 192, scr_bot, &bi, DIB_RGB_COLORS, SRCCOPY);
     BitBlt(dc, 0, 0, cw, ch, mem, 0, 0, SRCCOPY);
@@ -311,7 +315,7 @@ void fe_init(void) {
     saves_init();
     if ((e = getenv("B2W2_LAYOUT"))) layout = atoi(e) & 3;      /* 0 stacked, 1 big top, 2 side by side, 3 top only */
     to_menu = getenv("B2W2_TO_MENU") != NULL;
-    auto_continue = getenv("B2W2_CONTINUE") != NULL;
+    auto_continue = loading = getenv("B2W2_CONTINUE") != NULL;
     SetEnvironmentVariableA("B2W2_TO_MENU", NULL);
     SetEnvironmentVariableA("B2W2_CONTINUE", NULL);
     if (getenv("B2W2_HEADLESS")) { audio_init(); return; }
@@ -376,18 +380,19 @@ static int run_picker(int mode, char name[64]) {
     memcpy(keep_top, scr_top, sizeof keep_top);
     memcpy(keep_bot, scr_bot, sizeof keep_bot);
     picker_open(mode);
+    loading = 0;                             /* (a list over the black of a save file loading: shown) */
     int r;
     if (!wnd) {
         static uint32_t both[GPU3D_W * 384];
         picker_render(both, both + GPU3D_W * 192);
         write_png("picker.png", both, GPU3D_W, 384);
         picker_close();
-        /* testing: the file to choose; with commas, one after another each time the list comes up */
+        /* testing: the file to choose; with commas, one after another each time the list comes up (an empty one: B) */
         static int picks;
         const char *pick = getenv("B2W2_PICK");
         for (int k = 0; pick && k < picks && strchr(pick, ','); k++) pick = strchr(pick, ',') + 1;
         picks++;
-        if (pick) {
+        if (pick && strcspn(pick, ",")) {
             size_t n = strcspn(pick, ",");
             if (n > 63) n = 63;
             memcpy(name, pick, n);
@@ -396,11 +401,14 @@ static int run_picker(int mode, char name[64]) {
         }
         return -1;
     }
+    /* the key that opened the list (seen by polling) may still be waiting as a message: it isn't a choice */
+    MSG km;
+    while (PeekMessageA(&km, wnd, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE)) {}
     /* at the game's frame rate, mixing sound as it goes: the music carries on, and the menu sounds play */
     LONGLONG period = freq.QuadPart * 560190 / RC_CLOCK;
     LARGE_INTEGER next, now;
     QueryPerformanceCounter(&next);
-    int linger = -1;                     /* after choosing a file to play: a moment for its sound before the restart */
+    int linger = -1;                     /* after choosing: a moment for its sound (and before a restart) */
     for (;;) {
         MSG m;
         while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageA(&m); }
@@ -410,7 +418,7 @@ static int run_picker(int mode, char name[64]) {
         present();
         audio_frame();
         r = picker_result(name);
-        if (r && linger < 0) linger = mode == PICK_LOAD && r == 1 ? 20 : 0;
+        if (r && linger < 0) linger = mode == PICK_LOAD && r == 1 ? 20 : 10;
         if (quitting || (r && linger-- == 0)) break;
         next.QuadPart += period;
         QueryPerformanceCounter(&now);
@@ -424,7 +432,8 @@ static int run_picker(int mode, char name[64]) {
     picker_close();
     memcpy(scr_top, keep_top, sizeof keep_top);
     memcpy(scr_bot, keep_bot, sizeof keep_bot);
-    present();
+    /* (saving, that frame still has the field menu, and choosing a file to play, the title menu: the next ones haven't) */
+    if (mode != PICK_SAVE && r != 1) present();
     swallow_keys = 1;
     QueryPerformanceCounter(&next_frame);
     return quitting ? -1 : r;
@@ -467,34 +476,48 @@ static char report_file[64];             /* chosen, and the save not yet started
 static uint32_t report_panel[PANEL_SW * PANEL_SH];
 static int report_decided;               /* chosen on pressing レポート, before its screen: REPORT_YES or REPORT_NO */
 static int report_open;                  /* レポート was pressed in the field menu: the list at the next frame */
+static int report_press;                 /* frames left of the A that hands レポート to the game, once a file is chosen */
 
 /* The field menu's buttons are 2 x 3; the selected one has a blue face. A on the bottom left one, レポート. */
 extern int render_keep_b;                /* render.h (its OPAQUE would meet windows.h's) */
 extern uint32_t render_ui_b[192 * 256];
 
-static void report_menu_keys(uint16_t k) {
+/* The press is kept from the game (until A is let go) while the list is up: backing out of it leaves the menu as it
+ * was, and choosing a file presses A on レポート for the player, so the game starts its report then. */
+static void report_menu_keys(uint16_t *k) {
     static uint16_t last = 0x3ff;
-    uint16_t pressed = last & ~k;
-    last = k;
-    if (!(pressed & 1) || !rc_scene(SCENE_FIELD_MENU) || !render_keep_b) return;
+    static int hold;
+    uint16_t pressed = last & ~*k;
+    last = *k;
+    if (hold) {
+        if (*k & 1) hold = 0;
+        else { *k |= 1; return; }
+    }
+    if (report_press) { *k &= ~1u; report_press--; return; }
+    if (!(pressed & 1) || !rc_scene(SCENE_FIELD_MENU) || !render_keep_b || report_decided || report != REPORT_NONE) return;
     int blue = 0;
     for (int i = 0; i < 4; i++) {
         uint32_t c = render_ui_b[(130 + i * 6) * 256 + 100 + i * 4];
         blue += (c & 255) > (c >> 16 & 255) + 40;
     }
-    if (blue >= 3) report_open = 1;
+    if (blue >= 3) { report_open = 1; hold = 1; *k |= 1; }
 }
 
-/* The list as soon as レポート is pressed (the game moves on to the report's screen once it's closed) */
+/* The list as soon as レポート is pressed; the game's report starts once a file is chosen (B: nothing happens) */
 static void report_early(void) {
     if (!report_open) return;
     report_open = 0;
+    snd_menu_sound(1);                       /* the game's own decide sound would come with its screen, held back */
     picker_set_current_panel(NULL, 0, 0);
     char name[64];
     /* the file chosen is the one in use from now: a save that follows another closely (the same writing, to the
      * game) goes there too */
-    if (run_picker(PICK_SAVE, name) == 1) { strcpy(report_file, name); saves_set_current(name); report_decided = REPORT_YES; }
-    else report_decided = REPORT_NO;
+    if (run_picker(PICK_SAVE, name) == 1) {
+        strcpy(report_file, name);
+        saves_set_current(name);
+        report_decided = REPORT_YES;
+        report_press = 2;
+    }
 }
 
 static void save_panel(const char *name) {
@@ -517,6 +540,7 @@ static void report_frame(void) {
         report = REPORT_NONE;
         report_file[0] = 0;
         report_written = report_gone = 0;
+        report_decided = 0;
         return;
     }
     report_gone = 0;
@@ -540,14 +564,47 @@ static void report_frame(void) {
     }
 }
 
-/* The presses that answer the report's question: one every 16 frames, the player's own keys held back meanwhile */
+/* The presses that answer the report's question, every 4 frames, the player's own keys held back meanwhile */
 static void report_keys(uint16_t *k) {
-    if (report == REPORT_NONE) return;
+    if (report == REPORT_NONE || !rc_scene(SCENE_REPORT)) return;
     *k = 0x03ff;
-    if (!rc_scene(SCENE_REPORT)) return;
-    if (report == REPORT_YES && rc_frames % 16 < 2) *k &= ~0x0001u;        /* A */
-    if (report == REPORT_NO && rc_frames % 16 < 2) *k &= ~0x0002u;         /* B */
+    if (report == REPORT_YES && rc_frames % 4 < 2) *k &= ~0x0001u;         /* A */
+    if (report == REPORT_NO && rc_frames % 4 < 2) *k &= ~0x0002u;          /* B */
 }
+
+/* The report's event (func_ov012_021634f0, through 0215bf00; runtime.c calls this with the address of its state).
+ * It sets up its window and the panel (states 0-1), asks whether to write (2: the question, 3: はい/いいえ, 4: the
+ * answer), then writes: the panel and the field go into writing (5-8), the save (9), the jingle starts and the field
+ * leaves writing (10), a last line and waits for it, the jingle and a key (11-16), the end (19-20). A file chosen on
+ * the list goes straight from 2 to 5, so nothing is asked and the writing starts at once, and from 11 to the end, so
+ * the player is free as soon as it is written (the jingle plays on); the list closed with B goes to the end the answer
+ * いいえ takes (17). */
+static uint64_t report_event_frame;      /* the last frame the report's event ran (and wasn't at its end) */
+
+void fe_report_event(uint32_t state) {
+    static int skipping;                     /* this report's question was skipped */
+    uint32_t s = rd32(state);
+    report_event_frame = s >= 19 ? 0 : rc_frames;
+    if (s == 2) {
+        skipping = 0;
+        if (report_decided == REPORT_YES || report == REPORT_YES) { wr32(state, 5); skipping = 1; }
+        else if (report_decided == REPORT_NO || report == REPORT_NO) wr32(state, 17);
+    } else if (s == 11 && skipping) {
+        wr32(state, 19);
+        skipping = 0;
+    }
+}
+
+/* A report is under way, from pressing レポート (and choosing a file) until its event has ended: the field menu
+ * closing behind it and the band pointing down aren't shown (topscreen.c), and the game's decide sounds for the
+ * presses made for the player aren't heard (snd.c) */
+int fe_reporting(void) {
+    return report_open || report_press || report_decided == REPORT_YES ||
+           (report_event_frame && rc_frames <= report_event_frame + 2);
+}
+
+/* A save file chosen on the list is loading through the title menu (snd.c: its Continue makes no sound) */
+int fe_loading(void) { return loading; }
 
 /* The game started writing a save: ask which file it goes to (B: the one in use), unless the report's list just did */
 static void pick_save_file(void) {
@@ -612,9 +669,14 @@ static void read_input(void) {
     int tm = title_menu_keys(&k);
     if (tm) want_load = tm;
     /* restarted to continue: Continue (first on the menu, and selected) a moment after the menu is up */
-    if (auto_continue && rc_title_menu_frame && rc_frames > rc_title_menu_frame + 30) { auto_continue = 0; press_a = 2; }
+    static uint64_t menu_since;                                /* the frame the title menu came up */
+    if (!rc_scene(SCENE_TITLE_MENU)) menu_since = 0;
+    else if (!menu_since) menu_since = rc_frames;
+    if (auto_continue && menu_since && rc_frames > menu_since + 30) { auto_continue = 0; press_a = 2; }
     if (press_a) { k &= ~0x0001u; press_a--; }                 /* past title_menu_keys: the game sees it */
-    report_menu_keys(k);
+    /* the title menu has been and gone (Continue pressed, the menu faded): the game's own black, then the field */
+    if (loading && !auto_continue && !press_a && rc_title_menu_frame && !rc_scene(SCENE_TITLE_MENU)) loading = 0;
+    report_menu_keys(&k);
     top_screen_keys(&k);
     report_keys(&k);
     fe_keys = k;
@@ -674,7 +736,7 @@ void fe_vblank(void) {
         want_load = 0;
         char name[64];
         if (run_picker(PICK_LOAD, name) == 1) {
-            if (cont && !_stricmp(name, saves_current_name())) press_a = 2;
+            if (cont && !_stricmp(name, saves_current_name())) { press_a = 2; loading = 1; }
             else if (wnd) switch_save(name, cont);
         }
     }

@@ -548,6 +548,13 @@ static const struct { int overlay; uint32_t addr; int scene; } scene_marks[] = {
 };
 uint64_t rc_scene_frame[SCENE_COUNT];
 uint64_t rc_title_menu_frame;
+void fe_report_event(uint32_t state);             /* frontend.c */
+
+/* Calls the runtime steps into: the report's event (overlay 12), handed the address of its state in r1 */
+static void call_hooks(Cpu *c, const RcModule *m, uint32_t a) {
+    if (a == 0x0215bf00u && m->overlay == 12) fe_report_event(c->r[1]);
+}
+
 static void note_call(const RcModule *m, uint32_t a) {
     for (int i = 0; i < (int)(sizeof scene_marks / sizeof *scene_marks); i++)
         if (a == scene_marks[i].addr && m->overlay == scene_marks[i].overlay) {
@@ -579,9 +586,10 @@ static void checked_call(Cpu *c, RcFn fn, uint32_t a) {
     }
 }
 
-/* The calls through pointers seen lately, by address: the module and function found for each. A resident module's
- * is kept only where no code copy could also be (copies come first), and code copies and overlays are checked as
- * every time before their function runs. */
+/* The calls through pointers seen lately into resident code and code copies, by address: the module and function
+ * found for each. A resident module's is kept only where no code copy could also be (copies come first); a copy is
+ * checked as every time. Overlays aren't kept: two at one address can hold the same bytes there, and only the order
+ * below (the last one used first) tells them apart. */
 static struct { uint32_t a; const RcModule *m; RcFn fn; } call_cache[1024];
 
 void rc_call(Cpu *c, uint32_t addr) {
@@ -590,10 +598,10 @@ void rc_call(Cpu *c, uint32_t addr) {
     unsigned slot = (a >> 1) & 1023;
     if (call_cache[slot].a == a) {
         const RcModule *m = call_cache[slot].m;
-        if (m->overlay < 0 && !m->copy_src) { note_call(m, a); checked_call(c, call_cache[slot].fn, a); return; }
+        if (m->overlay < 0 && !m->copy_src) { note_call(m, a); call_hooks(c, m, a); checked_call(c, call_cache[slot].fn, a); return; }
         if (module_present(m, a, 0)) {
-            if (!m->copy_src) last_overlay = m;
             note_call(m, a);
+            call_hooks(c, m, a);
             checked_call(c, call_cache[slot].fn, a);
             return;
         }
@@ -601,7 +609,7 @@ void rc_call(Cpu *c, uint32_t addr) {
     /* Most indirect calls into overlays hit the same one as last time */
     if (last_overlay && a >= last_overlay->start && a < last_overlay->end) {
         RcFn fn = lookup(last_overlay, a);
-        if (fn && module_present(last_overlay, a, 0)) { note_call(last_overlay, a); checked_call(c, fn, a); return; }
+        if (fn && module_present(last_overlay, a, 0)) { note_call(last_overlay, a); call_hooks(c, last_overlay, a); checked_call(c, fn, a); return; }
     }
     /* Passes: code copies, resident modules, overlays matching at their start and at the function, then overlays
      * matching at the function only (DS Protect keeps the start of overlay 337 encrypted in RAM) */
@@ -613,12 +621,13 @@ void rc_call(Cpu *c, uint32_t addr) {
         RcFn fn = lookup(m, a);
         if (!fn || !module_present(m, a, pass == 3)) continue;
         if (kind == 2) last_overlay = m;
-        int cache = pass != 3;
+        int cache = kind != 2;
         if (kind == 1)
             for (int j = 0; j < rc_module_count; j++)
                 if (rc_modules[j].copy_src && a >= rc_modules[j].start && a < rc_modules[j].end) cache = 0;
         if (cache) { call_cache[slot].a = a; call_cache[slot].m = m; call_cache[slot].fn = fn; }
         note_call(m, a);
+        call_hooks(c, m, a);
         checked_call(c, fn, a);
         return;
     }

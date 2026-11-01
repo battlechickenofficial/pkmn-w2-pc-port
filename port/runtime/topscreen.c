@@ -406,7 +406,8 @@ void top_screen_prepare(int on) {
     render_moves[1] = battle ? (RenderMove){128, 256 + OFS, 100, 146, -PLAYER_RAISE} : (RenderMove){0};
     render_ui_mask = L_BG0 | L_BG1 | L_BG2 | L_OBJ;              /* all but the backgrounds on BG3 */
     /* the text box: the buttons go there, and the bag and the party go over it */
-    render_hide[0] = active && (rc_scene(SCENE_BATTLE_COMMAND) || rc_scene(SCENE_BATTLE_MOVES) ||
+    int fe_reporting(void);
+    render_hide[0] = active && (fe_reporting() || rc_scene(SCENE_BATTLE_COMMAND) || rc_scene(SCENE_BATTLE_MOVES) ||
                                 rc_scene(SCENE_BATTLE_BAG) || rc_scene(SCENE_BATTLE_PARTY) ||
                                 rc_scene(SCENE_FIELD_MENU) || rc_scene(SCENE_REPORT)) ? L_BG1 : 0;    /* (the field's: a band pointing down) */
 }
@@ -418,7 +419,8 @@ void top_screen_compose(uint32_t *top_screen) {
     uint16_t mb = io16(0x106c);
     int mf = (mb & 31) > 16 ? 16 : mb & 31;
     fade = mb >> 14 == 2 ? 255u * (uint32_t)(16 - mf) / 16 : 255;
-    if (rc_scene(SCENE_FIELD_MENU)) {
+    int fe_reporting(void);
+    if (rc_scene(SCENE_FIELD_MENU) && !fe_reporting()) {       /* (closing behind the report: gone with the list) */
         /* BG0 has the status bar on top and a bar along the bottom, and between them the selected button's label */
         if (background_up()) {
             copy_composed(16, 172);

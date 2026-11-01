@@ -752,10 +752,14 @@ void snd_menu_sound(int k) {
     if (getenv("B2W2_LOG_SND")) rc_logf("menu sound %d on player %d (frame %llu)\n", k, p, (unsigned long long)rc_frames);
 }
 
+int fe_reporting(void), fe_loading(void);  /* frontend.c */
 extern uint64_t snd_hush_cursor_until;   /* topscreen.c: the cursor sound of a press it adds, unheard */
 
 void snd_command(uint32_t id, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
     if ((id == 0 || id == 2) && a1 + a2 == menu_sounds[0].seq && rc_frames <= snd_hush_cursor_until) return;
+    /* while a report is under way, or a save file chosen on the list is loading through the title menu's Continue,
+     * the runtime presses A for the player: the list made its own decide sound */
+    if ((id == 0 || id == 2) && a1 + a2 == menu_sounds[1].seq && (fe_reporting() || fe_loading())) return;
     switch (id) {
     case 0: note_menu_sound(a1 + a2); start_seq((int)a0, a1, a2, a3, 1); break;   /* START_SEQ */
     case 1: if (a0 < 16) stop_player((int)a0, 0); break;              /* STOP_SEQ */

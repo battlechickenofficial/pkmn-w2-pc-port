@@ -56,8 +56,9 @@ same place does). The list is on the top screen in the game's font and style: th
 each, on the right the selected file's report panel from its last save (date, place, party, badges, Pokédex, play
 time), and under it the file's picture and date. Up/Down, L/R a page, A to choose, B to go back. The file in use
 continues at once; another restarts the game on it and continues; あたらしく はじめる starts on an empty chip. F7
-opens the same list anywhere (unsaved progress is lost). The field menu's レポート opens the list at once, skipping the
-game's question: choosing a file answers yes for you and the save goes there (B answers no). A save started any other
+opens the same list anywhere (unsaved progress is lost). The field menu's レポート opens the list at once, and choosing a
+file starts writing to it straight away: the game's report event skips its question and はい/いいえ (`fe_report_event`),
+and nothing of it shows on the top screen but the notebook over the player (B closes the list and writes nothing). A save started any other
 way pauses on "writing to the report" with the same list. The whole chip is written to the chosen file, so saving to
 another or a new one copies the game as it is now. A new game's first write, during the introduction, isn't asked
 about. Each file keeps `<name>.png` (the field's 3D view as saved, without text boxes) and `<name>.report.png` (the
