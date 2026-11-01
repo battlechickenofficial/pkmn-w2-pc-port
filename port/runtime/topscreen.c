@@ -493,16 +493,19 @@ void top_screen_compose(uint32_t *top_screen) {
 
 /* Keys on the way to the game: in the battle commands, Left and Right move along our row (round from RUN to FIGHT and
  * back), turned into the presses that move the game's cursor between the same buttons. Some pairs aren't neighbours
- * in the game's own layout and take two presses; the second one's cursor sound is hushed. Presses are queued, and
- * where the cursor is going is kept here rather than read back from the game, which shows it a frame or more later.
+ * in the game's own layout and take two presses. Presses are queued, and where the cursor is going is kept here
+ * rather than read back from the game, which shows it a frame or more later. The cursor sound is the runtime's, once
+ * for each move along the row however quick, and the game's own (once or twice a move, a queue behind) unheard.
  * Up and Down do nothing there. */
-uint64_t snd_hush_cursor_until;          /* snd.c: no cursor sound until this frame */
+int snd_hush_cursor;                     /* snd.c: the game's cursor sound unheard */
+void snd_menu_sound(int k);              /* snd.c: 0 cursor, 1 decide, 2 cancel */
 
 void top_screen_keys(uint16_t *keys) {
     static uint16_t last = 0x3ff, hidden;
-    static int queue[16], hush[16], queued, step, differ;
+    static int queue[16], queued, step, differ;
     uint16_t raw = *keys, pressed = last & ~raw;
     last = raw;
+    snd_hush_cursor = battle_command() || queued;
     if (!battle_command()) { hidden = 0; queued = step = 0; row_at = -1; return; }
     /* the game's cursor shows up on its own place (the last command chosen), or ends somewhere we didn't expect */
     if (row_at < 0 || (!queued && game_cursor >= 0 && game_cursor != row_at && ++differ > 10)) row_at = game_cursor;
@@ -510,6 +513,7 @@ void top_screen_keys(uint16_t *keys) {
     if (pressed & (K_LEFT | K_RIGHT | K_UP | K_DOWN)) {
         if (game_cursor < 0 || row_at < 0) {
             /* the first press only shows the game's cursor: let it through */
+            snd_menu_sound(0);
         } else {
             hidden |= pressed & (K_LEFT | K_RIGHT | K_UP | K_DOWN);
             static const int order[4] = {B_FIGHT, B_POKEMON, B_BAG, B_RUN};
@@ -528,9 +532,10 @@ void top_screen_keys(uint16_t *keys) {
                                                                                       * whichever it came from) */
                 int n = queued - step / 6 > 0 ? queued : 0;          /* what's left of the queue, kept */
                 if (!n) { queued = step = 0; }
-                if (k0 && queued < 15) { queue[queued] = k0; hush[queued++] = 0; }
-                if (k1 && queued < 16) { queue[queued] = k1; hush[queued++] = 1; }
+                if (k0 && queued < 15) queue[queued++] = k0;
+                if (k1 && queued < 16) queue[queued++] = k1;
                 row_at = t;
+                snd_menu_sound(0);
             }
         }
     }
@@ -538,7 +543,6 @@ void top_screen_keys(uint16_t *keys) {
     *keys |= hidden;
     if (queued) {                        /* each press held 2 frames, then 4 let go */
         int k = step / 6, f = step % 6;
-        if (f == 0 && hush[k]) snd_hush_cursor_until = rc_frames + 6;
         if (f < 2) *keys &= (uint16_t)~queue[k];
         if (++step == queued * 6) queued = step = 0;
     }

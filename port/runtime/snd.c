@@ -753,10 +753,10 @@ void snd_menu_sound(int k) {
 }
 
 int fe_reporting(void), fe_loading(void);  /* frontend.c */
-extern uint64_t snd_hush_cursor_until;   /* topscreen.c: the cursor sound of a press it adds, unheard */
+extern int snd_hush_cursor;               /* topscreen.c: the game's cursor sound unheard (the runtime plays its own) */
 
 void snd_command(uint32_t id, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
-    if ((id == 0 || id == 2) && a1 + a2 == menu_sounds[0].seq && rc_frames <= snd_hush_cursor_until) return;
+    if ((id == 0 || id == 2) && a1 + a2 == menu_sounds[0].seq && snd_hush_cursor) return;
     /* while a report is under way, or a save file chosen on the list is loading through the title menu's Continue,
      * the runtime presses A for the player: the list made its own decide sound */
     if ((id == 0 || id == 2) && a1 + a2 == menu_sounds[1].seq && (fe_reporting() || fe_loading())) return;
