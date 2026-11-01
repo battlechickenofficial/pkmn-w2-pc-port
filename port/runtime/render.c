@@ -182,6 +182,8 @@ static void bg_3d(Line *l, int y) {
 static const uint8_t obj_w[4][4] = {{8, 16, 32, 64}, {16, 32, 32, 64}, {8, 8, 16, 32}, {0, 0, 0, 0}};
 static const uint8_t obj_h[4][4] = {{8, 16, 32, 64}, {8, 8, 16, 32}, {16, 32, 32, 64}, {0, 0, 0, 0}};
 
+static void sprite_offset(int x, int y, int w, int h, int *dx, int *dy);
+
 static void objects(Line *l, int y) {
     const uint8_t *oam = rc_oam + (engine ? 0x400 : 0);
     for (int i = 0; i < 128; i++) {
@@ -196,6 +198,7 @@ static void objects(Line *l, int y) {
         int oy = a0 & 0xff, ox = a1 & 0x1ff;
         if (oy + bh > 256) oy -= 256;
         if (ox >= 256) ox -= 512;
+        if (!engine) { int mx, my; sprite_offset(ox, oy, bw, bh, &mx, &my); ox += mx; oy += my; }
         int line = y - oy;
         if (line < 0 || line >= bh) continue;
         int32_t pa = 256, pb = 0, pc = 0, pd = 256;
@@ -340,7 +343,6 @@ static uint32_t pre[2][256 * 192];       /* engine output before display mode an
 static uint32_t fin[2][GPU3D_W * 192];   /* what the screens show, with the widescreen margins */
 
 static void keep_layers(int y, Line *bg, Line *obj);
-static void move_sprites(int y, Line *obj);
 
 static void render_engine_line(int e, int y) {
     engine = e;
@@ -394,7 +396,6 @@ static void render_engine_line(int e, int y) {
         int hide = render_hide[e] | (only[e] ? ~only[e] & 31 : 0);
         for (int n = 0; n < 5; n++) if (hide >> n & 1) memset(n < 4 ? bg[n].flags : obj.flags, 0, GPU3D_W);
         if (!e) title_menu_line(y, bg, &obj);                /* the title menu's extra button (titlemenu.c) */
-        if (!e) move_sprites(y, &obj);
         if (e && render_keep_b) keep_layers(y, bg, &obj);
 
         static uint16_t comp[GPU3D_W];
@@ -529,28 +530,23 @@ static void keep_layers(int y, Line *bg, Line *obj) {
     }
 }
 
-/* Engine A's sprites in a few rectangles drawn dy lines higher or lower (the battle's HP boxes, raised with the view
- * in the top-screen-only layout): the line is drawn from the sprites of the line it comes from */
+/* Engine A's sprites moved whole (the top-screen-only battle, topscreen.c): the ones centred in one of a few
+ * rectangles (the HP boxes) dy lines higher or lower; the others above the text box with the 3D view, scaled about the
+ * screen's centre and raised, so what sits in the scene (a thrown or caught ball) stays on it. Moving pixels by
+ * rectangle instead cut a sprite across an edge in two. */
 RenderMove render_moves[4];
 
-static void move_sprites(int y, Line *obj) {
-    static Line from;
+static void sprite_offset(int x, int y, int w, int h, int *dx, int *dy) {
+    *dx = *dy = 0;
+    int cx = x + w / 2, cy = y + h / 2;
     for (int m = 0; m < 4; m++) {
         const RenderMove *mv = &render_moves[m];
-        if (!mv->dy) continue;
-        int x0 = mv->x0 < X0 ? X0 : mv->x0, x1 = mv->x1 > X1 ? X1 : mv->x1;
-        if (y >= mv->y0 && y < mv->y1)                                         /* where it was */
-            for (int x = x0; x < x1; x++) obj->flags[AT(x)] = 0;
-        int src = y - mv->dy;
-        if (src < mv->y0 || src >= mv->y1 || src < 0 || src >= 192) continue;
-        memset(from.flags, 0, sizeof from.flags);
-        if (dispcnt & 0x1000) objects(&from, src);
-        for (int x = x0; x < x1; x++) {
-            int i = AT(x);
-            if (!(from.flags[i] & OPAQUE)) continue;
-            obj->color[i] = from.color[i]; obj->prio[i] = from.prio[i]; obj->flags[i] = from.flags[i];
-            obj->alpha[i] = from.alpha[i];
-        }
+        if (mv->dy && cx >= mv->x0 && cx < mv->x1 && cy >= mv->y0 && cy < mv->y1) { *dy = mv->dy; return; }
+    }
+    if (gpu3d_view_scale != 1 && y + h <= 144) {
+        float vx = 128 + (cx - 128) * gpu3d_view_scale, vy = 96 + (cy - 96) * gpu3d_view_scale - gpu3d_view_raise;
+        *dx = (int)(vx < 0 ? vx - 0.5f : vx + 0.5f) - cx;
+        *dy = (int)(vy < 0 ? vy - 0.5f : vy + 0.5f) - cy;
     }
 }
 
